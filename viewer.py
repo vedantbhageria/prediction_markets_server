@@ -698,7 +698,7 @@ STATS_PAGE = """
       <dt>markets</dt><dd class="big">{{ '{:,}'.format(k.markets) }}</dd>
       <dt>candles downloaded</dt><dd>{{ '{:,}'.format(k.candles) }}</dd>
       <dt>markets with candles</dt><dd>{{ '{:,}'.format(k.covered) }}
-        ({{ '%.1f'|format(100 * k.covered / k.markets) }}%)</dd>
+        ({{ '%.1f'|format(100 * k.covered / k.markets) if k.markets else '0.0' }}%)</dd>
       <dt>if every market were fetched</dt><dd>~{{ '{:,}'.format(k.estimate) }}</dd>
     </dl>
     <h4>markets by sector</h4>
@@ -720,7 +720,7 @@ STATS_PAGE = """
       <dt>markets</dt><dd class="big">{{ '{:,}'.format(p.markets) }}</dd>
       <dt>candles downloaded</dt><dd>{{ '{:,}'.format(p.candles) }}</dd>
       <dt>markets with candles</dt><dd>{{ '{:,}'.format(p.covered) }}
-        ({{ '%.1f'|format(100 * p.covered / p.markets) }}%)</dd>
+        ({{ '%.1f'|format(100 * p.covered / p.markets) if p.markets else '0.0' }}%)</dd>
       <dt>if every market were fetched</dt><dd>~{{ '{:,}'.format(p.estimate) }}</dd>
     </dl>
     <h4>markets by sector</h4>
