@@ -43,7 +43,6 @@ CATEGORIES = _list("LIVE_CATEGORIES")                # empty = every category
 MARKET_RETENTION_DAYS = _num("MARKET_RETENTION_DAYS", 30)
 MARKET_SYNC_MINUTES = _num("MARKET_SYNC_MINUTES", 15, float)
 MARKET_CATEGORIES = _list("MARKET_CATEGORIES")       # Kalshi only; empty = all
-POLY_MAX_EVENTS = _num("POLY_MAX_EVENTS", 3000)      # busiest open events listed
 
 # --- backfill ---------------------------------------------------------------
 BACKFILL_DAYS = _num("BACKFILL_DAYS", 30)

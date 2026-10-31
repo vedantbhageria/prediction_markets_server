@@ -54,17 +54,25 @@ def get_pool(minconn: int = 1, maxconn: int = 10) -> ThreadedConnectionPool:
 
 @contextmanager
 def connection():
-    """Borrow a pooled connection; commits on success, rolls back on error."""
+    """Borrow a pooled connection; commits on success, rolls back on error.
+
+    A connection broken by a database restart is discarded rather than handed
+    back to the pool, so a long-running service recovers by itself.
+    """
     pool = get_pool()
     conn = pool.getconn()
+    broken = False
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            broken = True
         raise
     finally:
-        pool.putconn(conn)
+        pool.putconn(conn, close=broken or conn.closed != 0)
 
 
 @contextmanager

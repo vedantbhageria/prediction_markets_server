@@ -2,6 +2,7 @@
 
     python live.py                  # collect into PostgreSQL
     python live.py --dry-run        # no database: print candles for a few markets
+    python live.py --markets-only   # only keep the markets store current
     python live.py --no-prune       # never delete expired markets
 
 Three things happen side by side:
@@ -26,7 +27,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import catalogue
+import discovery
 import settings
 import store
 import venues
@@ -130,13 +131,13 @@ def dry_markets(venue, n):
     """A handful of busy markets straight from the API, for --dry-run."""
     if venue == "kalshi":
         found = []
-        for page, _ in zip(venues.kalshi_events("open"), range(3)):
+        for (page, _), _ in zip(venues.kalshi_events("open"), range(3)):
             for event in page:
                 found += event.get("markets") or []
         found.sort(key=lambda m: -float(m.get("volume_24h_fp") or 0))
         return {m["ticker"]: m["ticker"] for m in found[:n]}
     found = []
-    for page in venues.poly_events(100):
+    for (page, _), _ in zip(venues.poly_events(), range(3)):
         for event in page:
             found += [m for m in event.get("markets") or [] if venues.yes_token(m)]
     found.sort(key=lambda m: -float(m.get("volume24hr") or 0))
@@ -163,79 +164,24 @@ def retrack(collectors, pool, backfilled):
                      venue, len(collector.markets), len(fresh), len(todo))
 
 
-def serve(stop, prune=True):
-
+def serve(stop, prune=True, markets_only=False):
     store.ensure_schema()
+    if markets_only:
+        discovery.run(stop, prune)
+        return
+
     collectors = {v: Collector(v, stop) for v in settings.VENUES}
     pool = ThreadPoolExecutor(max_workers=settings.BACKFILL_WORKERS,
                               thread_name_prefix="backfill")
     backfilled = set()
 
-    # Whatever the last run left in the catalogue is good enough to start
-    # collecting on; the first sync takes a minute or two.
+    # Whatever the last run left in the store is good enough to start
+    # collecting on; discovery brings it up to date as it goes.
     retrack(collectors, pool, backfilled)
     for collector in collectors.values():
         collector.start()
 
-    def prune_expired():
-        if not (prune and settings.MARKET_RETENTION_DAYS > 0):
-            return
-        try:
-            dropped = store.prune(settings.MARKET_RETENTION_DAYS)
-            if dropped:
-                log.info("pruned %s", ", ".join(f"{n:,} {k}" for k, n in dropped.items()))
-        except Exception as exc:
-            log.warning("prune failed: %s: %s", type(exc).__name__, exc)
-
-    window = settings.MARKET_RETENTION_DAYS or 30
-    closed_since = {v: time.time() - window * 86400 for v in collectors}
-    series_at = 0.0
-    first = True
-    while not stop.is_set():
-        # 1. What is open right now.
-        for venue in collectors:
-            started = time.time()
-            try:
-                if venue == "kalshi" and started - series_at > 86400:
-                    catalogue.sync_series()
-                    series_at = started
-                n = catalogue.SYNC[venue](stop)
-                log.info("%s: open markets synced, %d seen in %.0fs",
-                         venue, n, time.time() - started)
-            except Exception as exc:
-                log.warning("%s: sync failed: %s: %s", venue, type(exc).__name__, exc)
-        if stop.is_set():
-            break
-        # 2. Drop what has aged out, and start collecting anything new.
-        prune_expired()
-        try:
-            retrack(collectors, pool, backfilled)
-        except Exception as exc:
-            log.warning("retrack failed: %s: %s", type(exc).__name__, exc)
-
-        # 3. Markets that closed since the last look. On start that is the
-        # whole retention window, which also covers any time spent stopped;
-        # after that, Kalshi is re-read since the previous pass. (Polymarket
-        # closes are picked up by the open sync re-reading what left its list.)
-        for venue in collectors:
-            if venue == "poly" and not first:
-                continue
-            started = time.time()
-            try:
-                n = catalogue.IMPORT_CLOSED[venue](stop, closed_since[venue])
-                closed_since[venue] = started - 3600
-                log.info("%s: closed markets imported, %d seen in %.0fs",
-                         venue, n, time.time() - started)
-            except Exception as exc:
-                log.warning("%s: closed import failed: %s: %s", venue,
-                            type(exc).__name__, exc)
-        if first:
-            prune_expired()
-        first = False
-
-        log.info("candles written so far: %s", ", ".join(
-            f"{v} {c.written:,}" for v, c in collectors.items()))
-        stop.wait(settings.MARKET_SYNC_MINUTES * 60)
+    discovery.run(stop, prune, after_pass=lambda: retrack(collectors, pool, backfilled))
 
     pool.shutdown(wait=False, cancel_futures=True)
     for collector in collectors.values():
@@ -261,6 +207,8 @@ def main():
                         help="print candles for a few markets; touches no database")
     parser.add_argument("--markets", type=int, default=10, help="with --dry-run")
     parser.add_argument("--seconds", type=float, default=60, help="with --dry-run")
+    parser.add_argument("--markets-only", action="store_true",
+                        help="only keep the markets store current; collect no candles")
     parser.add_argument("--no-prune", action="store_true",
                         help="keep expired markets instead of deleting them")
     args = parser.parse_args()
@@ -274,7 +222,7 @@ def main():
     if args.dry_run:
         dry_run(stop, args.markets, args.seconds)
     else:
-        serve(stop, prune=not args.no_prune)
+        serve(stop, prune=not args.no_prune, markets_only=args.markets_only)
 
 
 if __name__ == "__main__":

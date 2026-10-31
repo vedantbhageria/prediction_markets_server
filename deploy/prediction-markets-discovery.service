@@ -1,0 +1,27 @@
+# Keeps the markets store current (discovery only, no candles).
+#
+# sudo cp deploy/prediction-markets-discovery.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-discovery
+# journalctl -u prediction-markets-discovery -f
+#
+# Progress is saved in data/state/discovery.json, so a restart resumes rather
+# than starting over.
+
+[Unit]
+Description=prediction_markets market discovery
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python live.py --markets-only
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=30
+# SIGTERM lets the current page finish and the progress be saved.
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

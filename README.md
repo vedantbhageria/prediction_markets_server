@@ -3,31 +3,36 @@
 Kalshi and Polymarket market data in PostgreSQL, with a browser viewer for
 comparing the same question across both venues.
 
-## Live collector
+## Market discovery
 
 ```bash
-python live.py --dry-run     # no database: print 5-second candles for a few markets
-python live.py               # run forever; see deploy/ for the systemd unit
+python live.py --markets-only   # keep the markets store current; no candles
 ```
 
+Every `MARKET_SYNC_MINUTES` (default 15) it lists every open market on both
+venues, imports markets that closed since the last pass, and deletes markets
+that closed more than `MARKET_RETENTION_DAYS` (default 30) ago. The first pass
+imports everything closed within that window. Only the venues' own values are
+stored; the columns for derived data stay empty for now.
+
+Progress is saved in `data/state/discovery.json`, so a restart resumes an
+interrupted import from its last page and only re-reads the time it was down.
+`deploy/prediction-markets-discovery.service` runs it under systemd.
+
 ```
-live.py       the daemon: markets store, live candles, backfill
-settings.py   every tunable, read from .env (listed in .env.example)
-candles.py    price samples -> 5-second candles
-venues.py     the Kalshi and Polymarket calls it makes
-catalogue.py  keeps the catalogue of markets current
-backfill.py   one-minute history for a market when it is first collected
-store.py      candle writes, the per-ticker cap, pruning
+live.py        entry point (discovery, and later live candles)
+discovery.py   the pass schedule and its saved progress
+catalogue.py   one venue listing -> series / events / markets rows
+venues.py      the Kalshi and Polymarket calls
+store.py       schema setup, upserts, pruning, candle writes
+settings.py    every tunable, read from .env (listed in .env.example)
+schema.sql     tables; timescale.sql adds hypertables and rollups
 ```
 
-`live.py` creates the tables itself and **deletes markets that closed more than
+It creates the tables itself and **deletes markets that closed more than
 `MARKET_RETENTION_DAYS` ago, candles included**. Do not point it at a database
 holding history you want to keep without `--no-prune` or
 `MARKET_RETENTION_DAYS=0`.
-
-Neither venue serves anything finer than a minute, so the 5-second candles are
-built from polled quotes and begin when the collector does; backfilled history
-is one-minute.
 
 ## Batch scrapers (the original pipeline)
 

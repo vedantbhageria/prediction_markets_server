@@ -97,21 +97,29 @@ def kalshi_sample(market):
             _f(market.get("volume_fp")), _f(market.get("open_interest_fp")))
 
 
-def kalshi_events(status, min_close_ts=None):
-    """Pages of events with their markets nested. Combination (KXMVE) markets
-    are not listed under events, so this is the real catalogue."""
+def kalshi_events(status, min_close_ts=None, cursor=None):
+    """Pages of events with their markets nested, as (events, next_cursor).
+
+    Combination (KXMVE) markets are not listed under events, so this is the
+    real catalogue. Pass a cursor from an earlier page to resume there; the
+    cursor after the last page is None.
+    """
     params = {"status": status, "limit": 200, "with_nested_markets": "true"}
     if min_close_ts:
         params["min_close_ts"] = int(min_close_ts)
+    if cursor:
+        params["cursor"] = cursor
     seen = set()
     while True:
         data = call("GET", KALSHI + "/events", params=params, timeout=60, attempts=8)
         page = data.get("events") or []
+        cursor = data.get("cursor") or None
         if not page:
             return
-        yield page
-        cursor = data.get("cursor")
-        if not cursor or cursor in seen:
+        if cursor in seen:
+            cursor = None
+        yield page, cursor
+        if not cursor:
             return
         seen.add(cursor)
         params["cursor"] = cursor
@@ -139,25 +147,32 @@ def poly_midpoints(tokens):
     return out
 
 
-def poly_events(limit):
-    """Pages of open events, busiest first, with markets and tags nested.
+def poly_events(closed=False, end_date_min=None, cursor=None):
+    """Pages of events with their markets nested, as (events, next_cursor).
 
-    Gamma refuses offsets past a few thousand, so this stops at `limit` or
-    wherever the API does -- the busiest events come first either way.
+    Uses the keyset listing, which pages through everything; the offset
+    listing stops after a few thousand events. `end_date_min` is unix time.
     """
-    offset = 0
-    while offset < limit:
-        try:
-            page = call("GET", GAMMA + "/events",
-                        params={"closed": "false", "active": "true", "limit": 100,
-                                "offset": offset, "order": "volume24hr",
-                                "ascending": "false"}, timeout=60, attempts=6)
-        except VenueError:
-            return
+    params = {"limit": 100, "closed": "true" if closed else "false"}
+    if end_date_min:
+        params["end_date_min"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                               time.gmtime(end_date_min))
+    if cursor:
+        params["after_cursor"] = cursor
+    seen = set()
+    while True:
+        data = call("GET", GAMMA + "/events/keyset", params=params, timeout=60, attempts=6)
+        page = data.get("events") or []
+        cursor = data.get("next_cursor") or None
         if not page:
             return
-        yield page
-        offset += 100
+        if cursor in seen:
+            cursor = None
+        yield page, cursor
+        if not cursor:
+            return
+        seen.add(cursor)
+        params["after_cursor"] = cursor
 
 
 def poly_markets(condition_ids):

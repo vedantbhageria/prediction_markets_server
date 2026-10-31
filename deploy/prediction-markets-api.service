@@ -1,0 +1,27 @@
+# The HTTP API (FastAPI under uvicorn).
+#
+# sudo cp deploy/prediction-markets-api.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-api
+# journalctl -u prediction-markets-api -f
+#
+# Where it listens comes from API_HOST / API_PORT in .env. On the server
+# API_HOST is the machine's Tailscale address, so the API is reachable from
+# your own devices and not from the office network.
+
+[Unit]
+Description=prediction_markets API
+After=network-online.target postgresql.service redis-server.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+Environment=API_HOST=127.0.0.1 API_PORT=8000 PYTHONUNBUFFERED=1
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/uvicorn api.main:app --host ${API_HOST} --port ${API_PORT}
+# If Tailscale is not up yet at boot the address cannot be bound; try again.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
