@@ -1,0 +1,10 @@
+# Secrets: each machine keeps its own
+.env
+
+# Scraped files and downloads
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,21 @@
+# sudo cp deploy/prediction-markets-live.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-live
+# journalctl -u prediction-markets-live -f
+#
+# Adjust User and the two paths if the project lives somewhere else.
+
+[Unit]
+Description=prediction_markets live candle collector
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python live.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
