@@ -279,10 +279,10 @@ def main():
     for name in ("backfill", "live", "activity", "discover"):
         kill(name, signal.SIGTERM)
 
-    say("catching up once: one scan, its scores, two live cycles, backfill")
+    say("catching up once: one scan, its scores, three live cycles, backfill")
     run("discover", "discover.py", "--once")
     run("activity", "activity.py", "--once")
-    run("live", "live.py", "--cycles", "2", timeout=600)
+    run("live", "live.py", "--cycles", "3", timeout=600)
     run("backfill", "backfill.py")
     run("activity", "activity.py", "--once")
 
