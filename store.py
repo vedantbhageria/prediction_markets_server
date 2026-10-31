@@ -1,8 +1,7 @@
-"""Database side of the live collector: candles in, old rows out.
+"""Database side of collection: schema setup, upserts, candles in, old rows out.
 
-Live candles go into the same kalshi_candles / poly_candles tables the
-viewer already reads, so nothing downstream has to know they exist. Every
-candle is one minute, stamped with the start of that minute.
+Every candle is one minute, stamped with the start of that minute, and only
+minutes with a trade are stored.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -11,7 +10,6 @@ from psycopg2.extras import execute_values
 
 import db
 import paths
-import settings
 from db import connection
 
 # Per venue: where candles live, what they key on, and which table owns the key.
@@ -106,63 +104,66 @@ def upsert(cur, table, columns, rows, key, watch):
     return len(rows)
 
 
-def write_candles(venue, candles):
-    """Insert candles. Returns the number of rows offered.
+def write_candles(venue, candles, cur=None):
+    """Insert or refresh candles. Returns the number of rows offered.
 
-    Each candle is (key, ts, open, high, low, close, volume, open_interest
-    [, filled]); open_interest is ignored for Polymarket and filled defaults
-    to false. Rows are filtered against the market table in the same
-    statement: a market deleted from the manage page mid-flight would
-    otherwise fail the foreign key and take the whole batch down with it.
+    Each candle is (key, ts, open, high, low, close, volume, open_interest);
+    open_interest is ignored for Polymarket. A minute that is fetched again
+    replaces the stored row, so trades the venue recorded late are not lost.
+    Rows are filtered against the market table in the same statement: a market
+    deleted mid-flight would otherwise fail the foreign key and take the whole
+    batch down with it.
     """
     if not candles:
         return 0
     v = VENUES[venue]
-    names = [v["key"], "ts"] + v["cols"] + ["filled"]
     values = len(v["cols"])
+    names = [v["key"], "ts"] + v["cols"]
     select = ", ".join(["v.k", "v.ts::timestamptz"] +
-                       [f"v.c{i}::numeric" for i in range(values)] + ["v.filled::boolean"])
-    alias = ", ".join(["k", "ts"] + [f"c{i}" for i in range(values)] + ["filled"])
-    sql = (f"INSERT INTO {v['table']} ({', '.join(names)})"
+                       [f"v.c{i}::numeric" for i in range(values)])
+    alias = ", ".join(["k", "ts"] + [f"c{i}" for i in range(values)])
+    sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in v["cols"])
+    changed = " OR ".join(f"t.{c} IS DISTINCT FROM EXCLUDED.{c}" for c in v["cols"])
+    sql = (f"INSERT INTO {v['table']} AS t ({', '.join(names)})"
            f" SELECT {select} FROM (VALUES %s) AS v({alias})"
            f" WHERE EXISTS (SELECT 1 FROM {v['dim']} d WHERE d.{v['key']} = v.k)"
-           " ON CONFLICT DO NOTHING")
-    rows = [tuple(c[:2 + values]) + (bool(c[8]) if len(c) > 8 else False,)
-            for c in candles]
+           f" ON CONFLICT ({v['key']}, ts) DO UPDATE SET {sets} WHERE {changed}")
+    rows = [tuple(c[:2 + values]) for c in candles]
+    if cur is not None:
+        execute_values(cur, sql, rows, page_size=1000)
+        return len(rows)
     with connection() as conn:
-        with conn.cursor() as cur:
-            execute_values(cur, sql, rows, page_size=1000)
+        with conn.cursor() as c:
+            execute_values(c, sql, rows, page_size=1000)
     return len(rows)
 
 
-def tracked(venue):
-    """The markets to collect live: open, liquid enough, busiest first.
+def write_kalshi_fetch(candles, fetched):
+    """Kalshi candles plus the stretch of time they were fetched for, in one
+    transaction, so the bookkeeping can never claim minutes that were not
+    written.
 
-    Returns {key: token}. The token is what Polymarket prices are quoted by;
-    for Kalshi it is just the ticker again.
+    `fetched` is [(ticker, lo, hi)]: every trade in [lo, hi) is now stored. It
+    is merged into the market's [candles_fetched_from, candles_fetched_to) only
+    where it touches or overlaps it -- a stretch with a hole between it and
+    what was already covered is stored but not counted, so the hole stays
+    visible to whoever fills it.
     """
-    cats = settings.CATEGORIES
-    cat = " AND e.category = ANY(%s)" if cats else ""
-    args = (settings.MIN_VOLUME[venue],) + ((cats,) if cats else ()) + (settings.MAX_MARKETS,)
-    if venue == "kalshi":
-        rows = db.query(f"""
-            SELECT m.ticker AS k, m.ticker AS token
-            FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
-            WHERE m.close_time > now() AND COALESCE(m.result, '') = ''
-              AND COALESCE(m.volume, 0) >= %s{cat}
-            ORDER BY (m.raw->>'volume_24h_fp')::numeric DESC NULLS LAST,
-                     m.volume DESC NULLS LAST, m.ticker
-            LIMIT %s""", args)
-    else:
-        rows = db.query(f"""
-            SELECT p.condition_id AS k, p.yes_token_id AS token
-            FROM poly_markets p LEFT JOIN poly_events e USING (event_id)
-            WHERE p.closed IS NOT TRUE AND p.yes_token_id IS NOT NULL
-              AND COALESCE(p.volume, 0) >= %s{cat}
-            ORDER BY (p.raw->>'volume24hr')::numeric DESC NULLS LAST,
-                     p.volume DESC NULLS LAST, p.condition_id
-            LIMIT %s""", args)
-    return {r["k"]: r["token"] for r in rows}
+    with connection() as conn:
+        with conn.cursor() as cur:
+            write_candles("kalshi", candles, cur)
+            if fetched:
+                execute_values(cur, """
+                    UPDATE kalshi_tracking t SET
+                      candles_fetched_to = CASE WHEN f.lo <= t.candles_fetched_to
+                          THEN GREATEST(t.candles_fetched_to, f.hi) ELSE t.candles_fetched_to END,
+                      candles_fetched_from = CASE WHEN f.hi >= t.candles_fetched_from
+                          THEN LEAST(t.candles_fetched_from, f.lo) ELSE t.candles_fetched_from END
+                    FROM (VALUES %s) AS f(ticker, lo, hi)
+                    WHERE t.ticker = f.ticker""",
+                    list(fetched), template="(%s, %s::timestamptz, %s::timestamptz)",
+                    page_size=1000)
+    return len(candles)
 
 
 def prune(days):
@@ -186,6 +187,12 @@ def prune(days):
         ("poly markets", "DELETE FROM poly_markets WHERE closed IS TRUE AND end_date < %s", True),
         ("poly events", "DELETE FROM poly_events e WHERE NOT EXISTS"
                         " (SELECT 1 FROM poly_markets p WHERE p.event_id = e.event_id)", False),
+        # Observations activity.py has scored, or too old to be worth scoring.
+        ("kalshi observations", "DELETE FROM kalshi_observations o USING kalshi_scans s"
+                                " WHERE s.scan_id = o.scan_id AND (s.scored_at IS NOT NULL"
+                                "  OR s.started_at < now() - interval '1 day')", False),
+        ("kalshi scans", "DELETE FROM kalshi_scans WHERE started_at < now() - interval '7 days'",
+         False),
     ]
     counts = {}
     with connection() as conn:

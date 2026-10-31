@@ -25,7 +25,8 @@ BEGIN
                                    ('kalshi_perp_candles', 'ticker')) v(tbl, seg)
     LOOP
         IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables
-                       WHERE hypertable_name = t.tbl AND compression_enabled) THEN
+                       WHERE hypertable_schema = current_schema()
+                         AND hypertable_name = t.tbl AND compression_enabled) THEN
             EXECUTE format('ALTER TABLE %I SET (timescaledb.compress,'
                            ' timescaledb.compress_segmentby = %L,'
                            ' timescaledb.compress_orderby = %L)', t.tbl, t.seg, 'ts DESC');
@@ -37,8 +38,9 @@ END $$;
 
 -- ---------------------------------------------------------------------------
 -- Rollups. The raw tables are one-minute candles; 5m reads them, 15m reads 5m
--- and 1h reads 15m. `samples` is how many one-minute rows went into a bucket
--- and `filled` how many of those the venue sent nothing for.
+-- and 1h reads 15m. Only minutes with a trade are stored, so a bucket is made
+-- of its traded minutes and `trade_minutes` says how many there were; a bucket
+-- with no trade has no row.
 -- materialized_only = false: queries include data newer than the last refresh.
 -- ---------------------------------------------------------------------------
 
@@ -48,7 +50,7 @@ SELECT ticker, time_bucket(INTERVAL '5 minutes', ts) AS ts,
        first(open, ts) AS open, max(high) AS high, min(low) AS low,
        last(close, ts) AS close, sum(volume) AS volume,
        last(open_interest, ts) AS open_interest,
-       count(*) AS samples, count(*) FILTER (WHERE filled) AS filled
+       count(*) AS trade_minutes
 FROM kalshi_candles
 GROUP BY ticker, time_bucket(INTERVAL '5 minutes', ts)
 WITH NO DATA;
@@ -59,7 +61,7 @@ SELECT ticker, time_bucket(INTERVAL '15 minutes', ts) AS ts,
        first(open, ts) AS open, max(high) AS high, min(low) AS low,
        last(close, ts) AS close, sum(volume) AS volume,
        last(open_interest, ts) AS open_interest,
-       sum(samples) AS samples, sum(filled) AS filled
+       sum(trade_minutes) AS trade_minutes
 FROM kalshi_candles_5m
 GROUP BY ticker, time_bucket(INTERVAL '15 minutes', ts)
 WITH NO DATA;
@@ -70,7 +72,7 @@ SELECT ticker, time_bucket(INTERVAL '1 hour', ts) AS ts,
        first(open, ts) AS open, max(high) AS high, min(low) AS low,
        last(close, ts) AS close, sum(volume) AS volume,
        last(open_interest, ts) AS open_interest,
-       sum(samples) AS samples, sum(filled) AS filled
+       sum(trade_minutes) AS trade_minutes
 FROM kalshi_candles_15m
 GROUP BY ticker, time_bucket(INTERVAL '1 hour', ts)
 WITH NO DATA;
@@ -80,7 +82,7 @@ WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT condition_id, time_bucket(INTERVAL '5 minutes', ts) AS ts,
        first(open, ts) AS open, max(high) AS high, min(low) AS low,
        last(close, ts) AS close, sum(volume) AS volume,
-       count(*) AS samples, count(*) FILTER (WHERE filled) AS filled
+       count(*) AS trade_minutes
 FROM poly_candles
 GROUP BY condition_id, time_bucket(INTERVAL '5 minutes', ts)
 WITH NO DATA;
@@ -90,7 +92,7 @@ WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT condition_id, time_bucket(INTERVAL '15 minutes', ts) AS ts,
        first(open, ts) AS open, max(high) AS high, min(low) AS low,
        last(close, ts) AS close, sum(volume) AS volume,
-       sum(samples) AS samples, sum(filled) AS filled
+       sum(trade_minutes) AS trade_minutes
 FROM poly_candles_5m
 GROUP BY condition_id, time_bucket(INTERVAL '15 minutes', ts)
 WITH NO DATA;
@@ -100,7 +102,7 @@ WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT condition_id, time_bucket(INTERVAL '1 hour', ts) AS ts,
        first(open, ts) AS open, max(high) AS high, min(low) AS low,
        last(close, ts) AS close, sum(volume) AS volume,
-       sum(samples) AS samples, sum(filled) AS filled
+       sum(trade_minutes) AS trade_minutes
 FROM poly_candles_15m
 GROUP BY condition_id, time_bucket(INTERVAL '1 hour', ts)
 WITH NO DATA;

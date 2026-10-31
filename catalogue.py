@@ -11,11 +11,16 @@ Rows go down the chain the schema enforces, parent first:
 
 Writes only touch rows whose watched fields changed, so a re-run over data
 already stored costs reads, not writes.
+
+Kalshi reads also record what they saw -- each market's volume, and when
+Kalshi was asked for it -- in kalshi_observations, tagged with the discovery
+scan they belong to. activity.py turns those into activity scores.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 
 import db
 import settings
@@ -97,8 +102,27 @@ def _kalshi_rows(page, categories=None):
     return events, markets
 
 
-def _write_kalshi(events, markets):
-    """Series (placeholders until the daily series sync), events, markets."""
+VOLUME = MARKET_COLS.index("volume")
+
+
+def _observe(cur, markets, scan, asked, answered):
+    """Record each market's volume and the window it was true in: no earlier
+    than just before the request (less OBSERVATION_LAG, in case Kalshi's
+    listing runs a little behind its trades) and no later than the answer.
+    activity.py needs both ends to treat "volume unchanged" as "no trades"."""
+    if scan is None or not markets:
+        return
+    lo = datetime.fromtimestamp(asked - settings.OBSERVATION_LAG, timezone.utc)
+    hi = datetime.fromtimestamp(answered, timezone.utc)
+    rows = [(scan, m[0], m[VOLUME], lo, hi) for m in markets if m[VOLUME] is not None]
+    execute_values(cur, "INSERT INTO kalshi_observations"
+                        " (scan_id, ticker, volume, asked_at, answered_at) VALUES %s",
+                   rows, page_size=1000)
+
+
+def _write_kalshi(events, markets, scan=None, asked=None, answered=None):
+    """Series (placeholders until the daily series sync), events, markets --
+    and, inside a scan, what was observed."""
     with connection() as conn:
         with conn.cursor() as cur:
             series = sorted({e[1] for e in events if e[1]})
@@ -106,8 +130,24 @@ def _write_kalshi(events, markets):
                 cur.execute("INSERT INTO kalshi_series (series_ticker)"
                             " SELECT unnest(%s::text[]) ON CONFLICT DO NOTHING", (series,))
             store.upsert(cur, "kalshi_events", EVENT_COLS, events, "event_ticker", EVENT_WATCH)
-            return store.upsert(cur, "kalshi_markets", MARKET_COLS, markets,
-                                "ticker", MARKET_WATCH)
+            written = store.upsert(cur, "kalshi_markets", MARKET_COLS, markets,
+                                   "ticker", MARKET_WATCH)
+            _observe(cur, markets, scan, asked, answered)
+            return written
+
+
+def _timed(pages):
+    """(page, cursor, asked, answered) from a page generator: just before the
+    request that produced the page (retries included) and just after it came
+    back, so the page describes some moment in between."""
+    pages = iter(pages)
+    while True:
+        asked = time.time()
+        try:
+            page, cursor = next(pages)
+        except StopIteration:
+            return
+        yield page, cursor, asked, time.time()
 
 
 def sync_series(stop=None):
@@ -120,29 +160,32 @@ def sync_series(stop=None):
                                 "series_ticker", ["category", "title", "frequency"])
 
 
-def sync_kalshi(stop=None, categories=None):
+def sync_kalshi(stop=None, categories=None, scan=None):
     """Everything open now, then a re-read of stored markets that left the
     open list since -- which is how their final status and result land."""
     seen, total = set(), 0
-    for page, _ in venues.kalshi_events("open"):
+    for page, _, asked, answered in _timed(venues.kalshi_events("open")):
         if _stopped(stop):
             return total
         events, markets = _kalshi_rows(page, categories)
         seen.update(row[0] for row in markets)
-        total += _write_kalshi(events, markets)
+        total += _write_kalshi(events, markets, scan, asked, answered)
 
     stale = [r["ticker"] for r in db.query(
         "SELECT ticker FROM kalshi_markets WHERE COALESCE(result, '') = ''"
         " ORDER BY close_time DESC") if r["ticker"] not in seen][:STALE_MAX]
+    asked = time.time()
     rows = [_market_row(m) for m in venues.kalshi_markets(stale, timeout=30, attempts=5)]
+    answered = time.time()
     with connection() as conn:
         with conn.cursor() as cur:
             total += store.upsert(cur, "kalshi_markets", MARKET_COLS, rows,
                                   "ticker", MARKET_WATCH)
+            _observe(cur, rows, scan, asked, answered)
     return total
 
 
-def import_kalshi_closed(stop=None, since=None, progress=None, checkpoint=None):
+def import_kalshi_closed(stop=None, since=None, progress=None, checkpoint=None, scan=None):
     """Every market whose event closed or settled since `since` (unix time).
 
     `progress` is a dict the caller persists, and `checkpoint` is called after
@@ -160,10 +203,10 @@ def import_kalshi_closed(stop=None, since=None, progress=None, checkpoint=None):
     start = statuses.index(progress["status"]) if progress.get("status") in statuses else 0
     for i, status in enumerate(statuses[start:], start):
         cursor = progress.get("cursor") if progress.get("status") == status else None
-        for page, cursor in venues.kalshi_events(status, since, cursor):
+        for page, cursor, asked, answered in _timed(venues.kalshi_events(status, since, cursor)):
             if _stopped(stop):
                 return total
-            total += _write_kalshi(*_kalshi_rows(page))
+            total += _write_kalshi(*_kalshi_rows(page), scan, asked, answered)
             # After the last page, point at the next listing instead.
             nxt = (status, cursor) if cursor else (statuses[i + 1] if i + 1 < len(statuses) else "done", None)
             progress.update(status=nxt[0], cursor=nxt[1])
@@ -206,7 +249,7 @@ def _write_poly(events, markets):
                                 "condition_id", POLY_WATCH)
 
 
-def sync_poly(stop=None):
+def sync_poly(stop=None, scan=None):
     """Everything open now, then a re-read of stored markets that left the
     open list since -- which is how their closed flag gets set."""
     seen, total = set(), 0
@@ -231,7 +274,7 @@ def sync_poly(stop=None):
     return total
 
 
-def import_poly_closed(stop=None, since=None, progress=None, checkpoint=None):
+def import_poly_closed(stop=None, since=None, progress=None, checkpoint=None, scan=None):
     """Every closed event whose end date is after `since` (unix time), with
     its markets. Resumable through `progress`, as for Kalshi."""
     progress = progress if progress is not None else {}

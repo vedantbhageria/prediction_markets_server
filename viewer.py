@@ -24,7 +24,9 @@ from psycopg2.extras import RealDictCursor, execute_values
 import db
 import paths
 from db import connection
-from kalshi_markets import get_candles as kalshi_get_candles
+import fetch as candle_fetch
+import ratelimit
+import settings
 
 app = Flask(__name__)
 
@@ -1864,26 +1866,27 @@ def fetch_candles(name, ident):
         table = "poly_candles"
         cols = ("condition_id", "ts", "open", "high", "low", "close", "volume")
     else:
-        found = db.query("SELECT e.series_ticker, m.open_time, m.close_time"
-                         " FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)"
-                         " WHERE m.ticker = %s", (ident,))
+        # The same trades-only fetch live.py and backfill.py use, which also
+        # moves the market's bookkeeping forward.
+        found = db.query("SELECT open_time, close_time FROM kalshi_markets"
+                         " WHERE ticker = %s", (ident,))
         if not found:
             return 0, "market not found"
         row = found[0]
         lo = int(row["open_time"].timestamp()) if row["open_time"] else now - 30 * 86400
-        # Clamp a little past close: the final candle is stamped at the end of
-        # the minute it covers, so settling at 09:54:34 puts the busiest minute
-        # of the market's life at 09:55 -- outside a window that stops at close.
+        lo = max(lo, now - settings.BACKFILL_DAYS * 86400)
         hi = (min(int(row["close_time"].timestamp()) + 120, now)
               if row["close_time"] else now)
+        hi = candle_fetch.minute(hi - settings.SETTLE_SECONDS)
         if hi <= lo:
             return 0, "market has no elapsed time yet"
-        got = kalshi_get_candles(session, row["series_ticker"], ident, lo, hi, 1)
-        rows = [(c["ticker"], c["ts"], c["open"], c["high"], c["low"],
-                 c["close"], c["volume"], c["open_interest"]) for c in got]
-        table = "kalshi_candles"
-        cols = ("ticker", "ts", "open", "high", "low", "close", "volume",
-                "open_interest")
+        total = 0
+        for planned in candle_fetch.plan([(ident, candle_fetch.minute(lo), hi)]):
+            n = candle_fetch.run(planned)
+            if n is None:
+                return total, "Kalshi did not answer; try again"
+            total += n
+        return total, None if total else "no trades in this market's history"
 
     if not rows:
         return 0, "the venue returned no candles for this market"
@@ -2479,6 +2482,9 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1",
                         help="use 0.0.0.0 to allow other machines on your LAN")
     args = parser.parse_args()
+    # Downloads started from the page share the Kalshi budget below live's hot
+    # markets and above backfill.
+    ratelimit.DEFAULT = "warm"
 
     print(f"http://127.0.0.1:{args.port}")
     app.run(host=args.host, port=args.port, threaded=True)

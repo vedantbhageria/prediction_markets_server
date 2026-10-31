@@ -1,8 +1,4 @@
-"""Every tunable for the live collector, read from the environment / .env.
-
-Volume thresholds follow what the batch scrapers already assumed: Kalshi
-markets over 100 contracts, Polymarket markets over $10,000.
-"""
+"""Every tunable, read from the environment / .env."""
 
 import os
 
@@ -20,20 +16,12 @@ def _list(name):
     return [part.strip() for part in os.environ.get(name, "").split(",") if part.strip()]
 
 
-# --- candles ---------------------------------------------------------------
-# Width of a stored candle. One minute: the same as both venues' own history,
-# so live and backfilled rows are interchangeable.
-CANDLE_SECONDS = _num("LIVE_CANDLE_SECONDS", 60)
-# How often each venue is sampled. Several samples per candle are what give it
-# a real high and low; one per candle would make open = high = low = close.
-POLL_SECONDS = _num("LIVE_POLL_SECONDS", 5, float)
-
-# --- which markets are collected live --------------------------------------
+# --- venues -----------------------------------------------------------------
 VENUES = _list("LIVE_VENUES") or ["kalshi", "poly"]
-MAX_MARKETS = _num("LIVE_MAX_MARKETS", 500)          # per venue, busiest first
-MIN_VOLUME = {"kalshi": _num("LIVE_MIN_VOLUME_KALSHI", 100, float),
-              "poly": _num("LIVE_MIN_VOLUME_POLY", 10000, float)}
-CATEGORIES = _list("LIVE_CATEGORIES")                # empty = every category
+KALSHI_API_URL = (os.environ.get("KALSHI_API_URL", "").strip()
+                  or "https://external-api.kalshi.com/trade-api/v2")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+REDIS_PREFIX = os.environ.get("REDIS_PREFIX", "pm:")   # tests use their own
 
 # --- markets store ----------------------------------------------------------
 # The store holds markets that are still running or closed within this many
@@ -44,6 +32,31 @@ MARKET_RETENTION_DAYS = _num("MARKET_RETENTION_DAYS", 30)
 MARKET_SYNC_MINUTES = _num("MARKET_SYNC_MINUTES", 15, float)
 MARKET_CATEGORIES = _list("MARKET_CATEGORIES")       # Kalshi only; empty = all
 
-# --- backfill ---------------------------------------------------------------
+# --- request budget ---------------------------------------------------------
+# Every Kalshi request from every program (discover, live, backfill) comes out
+# of this one budget, shared through Redis. Kalshi publishes 20/s for signed-in
+# Basic accounts and nothing for anonymous ones, so the default stays far below.
+KALSHI_REQUESTS_PER_MIN = _num("KALSHI_REQUESTS_PER_MIN", 240)
+
+# --- activity score ----------------------------------------------------------
+HALF_LIFE_MINUTES = _num("ACTIVITY_HALF_LIFE_MINUTES", 60, float)
+HOT_ENTER = _num("HOT_ENTER", 1.0, float)      # contracts/min to become hot
+HOT_EXIT = _num("HOT_EXIT", 0.5, float)        # ...and to stop being hot
+# Part of the budget never planned for, so a busy minute cannot hit the limit.
+BUDGET_HEADROOM = _num("BUDGET_HEADROOM", 0.10, float)
+
+# --- live candles ------------------------------------------------------------
+# A scan's read time is recorded this much earlier than the request, in case
+# the venue's listing lags its trades a little. Costs nothing but a short delay.
+OBSERVATION_LAG = _num("OBSERVATION_LAG_SECONDS", 120)
+# A minute is fetched once it ended this long ago, and hot markets re-read the
+# last HOT_OVERLAP seconds every time, so trades the venue records late land.
+SETTLE_SECONDS = _num("LIVE_SETTLE_SECONDS", 60)
+HOT_OVERLAP = _num("LIVE_HOT_OVERLAP_SECONDS", 120)
+# A market first seen this soon after it opened has its few minutes of history
+# fetched by live; older ones leave their history to backfill.py.
+NEW_MARKET_HOURS = _num("NEW_MARKET_HOURS", 2, float)
+FETCH_WORKERS = _num("LIVE_FETCH_WORKERS", 4)
+
+# --- backfill ----------------------------------------------------------------
 BACKFILL_DAYS = _num("BACKFILL_DAYS", 30)
-BACKFILL_WORKERS = _num("BACKFILL_WORKERS", 4)

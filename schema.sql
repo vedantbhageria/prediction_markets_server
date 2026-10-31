@@ -69,9 +69,9 @@ CREATE INDEX IF NOT EXISTS kalshi_markets_event_idx ON kalshi_markets (event_tic
 CREATE INDEX IF NOT EXISTS kalshi_markets_close_idx ON kalshi_markets (close_time);
 CREATE INDEX IF NOT EXISTS kalshi_markets_strike_type_idx ON kalshi_markets (strike_type);
 
--- One row per market per minute, stamped with the start of the minute.
--- `filled` marks a minute the venue sent nothing for: the row repeats the
--- previous close with volume 0 so every minute is present.
+-- One row per market per minute that had at least one trade, stamped with
+-- the start of the minute. Minutes without a trade have no row; they are
+-- filled in when read, not stored.
 CREATE TABLE IF NOT EXISTS kalshi_candles (
     ticker        TEXT NOT NULL REFERENCES kalshi_markets (ticker) ON DELETE CASCADE,
     ts            TIMESTAMPTZ NOT NULL,
@@ -81,11 +81,53 @@ CREATE TABLE IF NOT EXISTS kalshi_candles (
     close         NUMERIC(12, 6),
     volume        NUMERIC(20, 4),
     open_interest NUMERIC(20, 4),
-    filled        BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (ticker, ts)
 );
 
 CREATE INDEX IF NOT EXISTS kalshi_candles_ts_idx ON kalshi_candles (ts);
+
+-- Live-collection bookkeeping, one row per market.
+--
+--   volume, volume_measured_at  the market's total volume at the last scan,
+--                               and when it was read (see activity.py)
+--   activity_score              smoothed trading rate, contracts per minute
+--   candles_fetched_from/_to    every trade in [from, to) has its candle stored
+--
+-- No index on activity_score: it changes every scan, and an index on it would
+-- turn each of those cheap in-page updates into a full rewrite. Picking the
+-- busiest markets is a ~40 ms scan without one. fillfactor leaves room in each
+-- page for those updates.
+CREATE TABLE IF NOT EXISTS kalshi_tracking (
+    ticker               TEXT PRIMARY KEY REFERENCES kalshi_markets (ticker) ON DELETE CASCADE,
+    volume               NUMERIC(20, 4) NOT NULL,
+    volume_measured_at   TIMESTAMPTZ NOT NULL,
+    activity_score       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    candles_fetched_from TIMESTAMPTZ NOT NULL,
+    candles_fetched_to   TIMESTAMPTZ NOT NULL
+) WITH (fillfactor = 70);
+
+-- One row per discovery scan. activity.py scores each scan once, in order.
+CREATE TABLE IF NOT EXISTS kalshi_scans (
+    scan_id     BIGSERIAL PRIMARY KEY,
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    scored_at   TIMESTAMPTZ
+);
+
+-- What each scan read: a market's volume, and the two moments it was true
+-- between -- the venue was asked at asked_at (less OBSERVATION_LAG, in case its
+-- listing runs behind) and had answered by answered_at. A hand-off from
+-- discovery to activity.py, emptied once a scan is scored. UNLOGGED: it is
+-- rewritten every scan, and losing it in a crash only skips one scan's scores.
+CREATE UNLOGGED TABLE IF NOT EXISTS kalshi_observations (
+    scan_id     BIGINT NOT NULL,
+    ticker      TEXT NOT NULL,
+    volume      NUMERIC(20, 4) NOT NULL,
+    asked_at    TIMESTAMPTZ NOT NULL,
+    answered_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS kalshi_observations_scan_idx ON kalshi_observations (scan_id);
 
 
 -- Perpetual futures. contract_size is needed to read the price at all: a
@@ -107,7 +149,6 @@ CREATE TABLE IF NOT EXISTS kalshi_perp_candles (
     close         NUMERIC(20, 6),
     volume        NUMERIC(20, 4),
     open_interest NUMERIC(20, 4),
-    filled        BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (ticker, ts)
 );
 
@@ -165,7 +206,6 @@ CREATE TABLE IF NOT EXISTS poly_candles (
     low           NUMERIC(12, 6),
     close         NUMERIC(12, 6),
     volume        NUMERIC(20, 4),
-    filled        BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (condition_id, ts)
 );
 
@@ -181,3 +221,25 @@ CREATE INDEX IF NOT EXISTS kalshi_markets_title_trgm_idx
     ON kalshi_markets USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
     ON poly_markets USING gin (question gin_trgm_ops);
+
+
+-- ---------------------------------------------------------------------------
+-- Upgrades for databases made by an earlier version of this file.
+-- ---------------------------------------------------------------------------
+
+-- Candles used to carry a `filled` flag for minutes with no trade. Only traded
+-- minutes are stored now. The rollups read the column, so they go first;
+-- timescale.sql makes them again.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = current_schema() AND column_name = 'filled'
+                 AND table_name IN ('kalshi_candles', 'poly_candles', 'kalshi_perp_candles')) THEN
+        DROP VIEW IF EXISTS candles_1m, candles_5m, candles_15m, candles_1h;
+        DROP MATERIALIZED VIEW IF EXISTS kalshi_candles_1h, kalshi_candles_15m,
+            kalshi_candles_5m, poly_candles_1h, poly_candles_15m, poly_candles_5m CASCADE;
+        ALTER TABLE kalshi_candles DROP COLUMN IF EXISTS filled;
+        ALTER TABLE poly_candles DROP COLUMN IF EXISTS filled;
+        ALTER TABLE kalshi_perp_candles DROP COLUMN IF EXISTS filled;
+    END IF;
+END $$;

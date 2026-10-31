@@ -12,11 +12,12 @@
       state/               resume bookkeeping: .done, .cursor, .loaded
 """
 
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
-STATE = DATA / "state"
+STATE = Path(os.environ.get("PM_STATE_DIR") or DATA / "state")   # tests use their own
 CANDLES = DATA / "candles"
 
 # Catalogues

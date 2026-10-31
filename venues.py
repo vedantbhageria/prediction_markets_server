@@ -1,6 +1,7 @@
-"""Read-only calls to Kalshi and Polymarket used by the live collector.
+"""Read-only calls to Kalshi and Polymarket.
 
-Everything here is a public endpoint; no API key is involved.
+Everything here is a public endpoint; no API key is involved. Every Kalshi
+request first takes a token from the shared budget in ratelimit.py.
 """
 
 import json
@@ -10,17 +11,23 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-KALSHI = "https://external-api.kalshi.com/trade-api/v2"
+import ratelimit
+import settings
+
+KALSHI = settings.KALSHI_API_URL
 GAMMA = "https://gamma-api.polymarket.com"
 CLOB = "https://clob.polymarket.com"
 
-KALSHI_BATCH = 100      # tickers per /markets request
+KALSHI_BATCH = 100      # tickers per /markets or /markets/candlesticks request
+KALSHI_MAX_CANDLES = 10_000     # market-minutes one candlesticks request may ask for
 POLY_BATCH = 400        # tokens per /midpoints request; the API rejects ~1000
 GAMMA_BATCH = 50        # condition ids per /markets request
 
 
 class VenueError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 # One requests.Session per thread; Sessions are not safe to share.
@@ -34,25 +41,33 @@ def session():
     return _local.session
 
 
-def call(method, url, params=None, body=None, timeout=10, attempts=1):
-    """One request. The live loop allows a single quick retry and no more: a
-    late answer is worth less than the next poll."""
+def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None):
+    """One request, retried up to `attempts` times on errors worth retrying.
+
+    Kalshi requests wait for the shared budget first, and a 429 from Kalshi
+    halves that budget for every program before the retry.
+    """
     status = None
+    kalshi = url.startswith(KALSHI)
     for attempt in range(attempts):
+        if kalshi and not ratelimit.acquire(stop):
+            raise VenueError(f"{url}: stopped", status)
         try:
             response = session().request(method, url, params=params, json=body,
                                          timeout=timeout)
             status = response.status_code
             if status < 400:
                 return response.json()
-            if status != 429 and status < 500:
-                raise VenueError(f"{url}: HTTP {status} {response.text[:120]}")
+            if status == 429 and kalshi:
+                ratelimit.throttled()
+            elif status != 429 and status < 500:
+                raise VenueError(f"{url}: HTTP {status} {response.text[:120]}", status)
         except requests.RequestException:
             if attempt == attempts - 1:
                 raise
         if attempt < attempts - 1:
             time.sleep(min(2 ** attempt, 30))
-    raise VenueError(f"{url}: HTTP {status}, gave up")
+    raise VenueError(f"{url}: HTTP {status}, gave up", status)
 
 
 def _chunks(items, size):
@@ -83,20 +98,6 @@ def kalshi_markets(tickers, timeout=10, attempts=2):
     return out
 
 
-def kalshi_sample(market):
-    """(quote, trade, running volume, open interest) from a market payload.
-
-    The quote is the mid, but only when both sides are really there: an empty
-    side shows as a 0.00 bid or a 1.00 ask, and a mid taken across that would
-    put a dead market at 50%.
-    """
-    bid, ask = _f(market.get("yes_bid_dollars")), _f(market.get("yes_ask_dollars"))
-    last = _f(market.get("last_price_dollars"))
-    quote = (bid + ask) / 2 if (bid and ask and bid > 0 and ask < 1) else None
-    return (quote, last if last else None,
-            _f(market.get("volume_fp")), _f(market.get("open_interest_fp")))
-
-
 def kalshi_events(status, min_close_ts=None, cursor=None):
     """Pages of events with their markets nested, as (events, next_cursor).
 
@@ -123,6 +124,27 @@ def kalshi_events(status, min_close_ts=None, cursor=None):
             return
         seen.add(cursor)
         params["cursor"] = cursor
+
+
+def kalshi_candles(tickers, start, end, timeout=30, attempts=3, stop=None):
+    """{ticker: [candlestick payloads]} for one-minute candles ending in
+    [start, end] (unix seconds, both inclusive, as Kalshi reads them).
+
+    A ticker Kalshi did not answer for is missing from the result, which is
+    different from one that is present with no candles.
+    """
+    tickers = list(tickers)
+    if len(tickers) > KALSHI_BATCH:
+        raise ValueError(f"{len(tickers)} tickers in one candle request")
+    if len(tickers) * ((end - start) // 60 + 1) > KALSHI_MAX_CANDLES:
+        raise ValueError(f"{len(tickers)} tickers x {(end - start) // 60 + 1} minutes"
+                         " is more than one candle request may ask for")
+    data = call("GET", KALSHI + "/markets/candlesticks",
+                params={"market_tickers": ",".join(tickers), "start_ts": int(start),
+                        "end_ts": int(end), "period_interval": 1},
+                timeout=timeout, attempts=attempts, stop=stop)
+    return {m.get("market_ticker"): m.get("candlesticks") or []
+            for m in data.get("markets") or []}
 
 
 def kalshi_series():

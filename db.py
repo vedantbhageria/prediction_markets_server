@@ -40,8 +40,12 @@ def dsn_params() -> dict[str, str | int]:
         "user": os.environ.get("PGUSER", "postgres"),
         "password": password,
         # Timestamps are stored UTC; display them in IST regardless of what
-        # timezone the machine running this happens to be set to.
-        "options": f"-c timezone={os.environ.get('PGTIMEZONE', 'Asia/Kolkata')}",
+        # timezone the machine running this happens to be set to. PGSCHEMA
+        # puts every table in a schema of its own -- how the tests run beside
+        # the real data without touching it.
+        "options": f"-c timezone={os.environ.get('PGTIMEZONE', 'Asia/Kolkata')}"
+                   + (f" -c search_path={os.environ['PGSCHEMA']},public"
+                      if os.environ.get("PGSCHEMA") else ""),
     }
 
 

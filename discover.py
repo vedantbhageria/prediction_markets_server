@@ -1,5 +1,9 @@
 """Market discovery: keep the markets store current, pass after pass.
 
+    python discover.py              # run forever (the discovery service)
+    python discover.py --once       # one pass, then exit
+    python discover.py --no-prune   # never delete expired markets
+
 Every MARKET_SYNC_MINUTES, for each venue:
 
   1. open      everything open now is added or updated, and stored markets
@@ -17,15 +21,24 @@ up where the last run stopped:
   - the closed-market import resumes from the last page it finished, and
     covers exactly the time the service was down -- no gap, no full re-read
   - Kalshi's series list is refreshed once a day, not on every start
+
+Each pass is also a Kalshi scan: a row in kalshi_scans, and every market's
+volume as read, in kalshi_observations. activity.py scores it once it is done.
+Discovery never waits for that.
 """
 
+import argparse
 import json
 import logging
 import os
+import signal
+import threading
 import time
 
 import catalogue
+import db
 import paths
+import ratelimit
 import settings
 import store
 
@@ -52,7 +65,7 @@ def _window_start(now):
     return now - (settings.MARKET_RETENTION_DAYS or 30) * 86400
 
 
-def _closed_import(venue, state, stop):
+def _closed_import(venue, state, stop, scan=None):
     """Import markets closed since the last completed import, resuming an
     interrupted one where it stopped."""
     v = state.setdefault(venue, {})
@@ -69,7 +82,8 @@ def _closed_import(venue, state, stop):
     started = time.time()
     try:
         n = catalogue.IMPORT_CLOSED[venue](stop, job["since"], progress=job,
-                                           checkpoint=lambda: save_state(state))
+                                           checkpoint=lambda: save_state(state),
+                                           scan=scan if venue == "kalshi" else None)
     except Exception:
         # A saved cursor the venue no longer accepts would fail every time;
         # start that import over on the next pass instead.
@@ -86,8 +100,27 @@ def _closed_import(venue, state, stop):
              venue, f"{n:,}", time.time() - started)
 
 
+def _scan_started():
+    """A new kalshi_scans row, or None if the database is not answering --
+    the pass still runs, it just goes unscored."""
+    try:
+        return db.query("INSERT INTO kalshi_scans DEFAULT VALUES RETURNING scan_id")[0]["scan_id"]
+    except Exception as exc:
+        log.warning("could not open a scan: %s: %s", type(exc).__name__, exc)
+        return None
+
+
+def _scan_finished(scan):
+    try:
+        db.execute("UPDATE kalshi_scans SET finished_at = now() WHERE scan_id = %s", (scan,))
+    except Exception as exc:
+        # activity.py still scores it, once the next scan has started.
+        log.warning("could not close scan %s: %s: %s", scan, type(exc).__name__, exc)
+
+
 def run_pass(stop, state, prune=True):
     now = time.time()
+    scan = _scan_started() if "kalshi" in settings.VENUES else None
     if "kalshi" in settings.VENUES and now - state.get("series_synced_at", 0) > 86400:
         try:
             n = catalogue.sync_series()
@@ -102,7 +135,7 @@ def run_pass(stop, state, prune=True):
             return
         started = time.time()
         try:
-            n = catalogue.SYNC[venue](stop)
+            n = catalogue.SYNC[venue](stop, scan=scan if venue == "kalshi" else None)
             if stop.is_set():
                 return
             state.setdefault(venue, {})["open_synced_at"] = started
@@ -114,9 +147,12 @@ def run_pass(stop, state, prune=True):
         if stop.is_set():
             return
         try:
-            _closed_import(venue, state, stop)
+            _closed_import(venue, state, stop, scan)
         except Exception as exc:
             log.warning("%s: closed import failed: %s: %s", venue, type(exc).__name__, exc)
+
+    if scan is not None and not stop.is_set():
+        _scan_finished(scan)
 
     if prune and settings.MARKET_RETENTION_DAYS > 0 and not stop.is_set():
         try:
@@ -154,3 +190,28 @@ def run(stop, prune=True, after_pass=None):
         # Keep to the schedule; a pass that overran starts the next at once.
         due = max(started + interval, time.time())
     log.info("stopped")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Keep the markets store current.")
+    parser.add_argument("--once", action="store_true", help="one pass, then exit")
+    parser.add_argument("--no-prune", action="store_true",
+                        help="keep expired markets instead of deleting them")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
+    ratelimit.DEFAULT = "discover"
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+
+    store.ensure_schema()
+    if args.once:
+        run_pass(stop, load_state(), prune=not args.no_prune)
+    else:
+        run(stop, prune=not args.no_prune)
+
+
+if __name__ == "__main__":
+    main()

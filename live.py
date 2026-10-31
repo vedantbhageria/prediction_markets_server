@@ -1,23 +1,24 @@
-"""The live collector. Runs forever; meant to sit under systemd.
+"""Live Kalshi candles: keeps the newest edge of every market's history current.
 
-    python live.py                  # collect into PostgreSQL
-    python live.py --dry-run        # no database: print candles for a few markets
-    python live.py --markets-only   # only keep the markets store current
-    python live.py --no-prune       # never delete expired markets
+    python live.py              # run forever (the live service)
+    python live.py --cycles 3   # three one-minute cycles, then exit
 
-Three things happen side by side:
+Every minute, once the previous minute has settled (LIVE_SETTLE_SECONDS):
 
-  markets store  on start, and every MARKET_SYNC_MINUTES after, the open
-                 markets are re-read from both venues and anything that closed
-                 more than MARKET_RETENTION_DAYS ago is deleted. On start the
-                 store is also filled with markets that closed inside that
-                 window, so a stop of any length leaves no gap.
-  live candles   each venue's busiest open markets are polled every
-                 LIVE_POLL_SECONDS and folded into one-minute candles
-  backfill       a market's one-minute history is fetched the first time it is
-                 collected, which on a fresh start means all of them
+    hot    the markets on activity.py's hot list are fetched from where their
+           candles stop up to now, re-reading the last LIVE_HOT_OVERLAP
+           seconds so trades Kalshi records late still land
+    warm   then, until the next minute is due, every market that traded since
+           its candles were last fetched (candles_fetched_to before
+           volume_measured_at) -- which is also how anything missed while this
+           was stopped, or while Kalshi or the network was down, gets caught up
+    cold   markets whose volume did not move need nothing: activity.py has
+           already moved their coverage forward
 
-Every knob is in settings.py.
+Nothing here keeps state of its own: what to fetch is read from
+kalshi_tracking each cycle and every successful request moves it forward, so
+a crash or restart at any point loses nothing. Every request draws on the
+shared budget in ratelimit.py: hot at full priority, warm at a lower one.
 """
 
 import argparse
@@ -25,204 +26,143 @@ import logging
 import signal
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-import discovery
+import activity
+import db
+import fetch
+import ratelimit
 import settings
-import store
-import venues
-from backfill import BACKFILL
-from candles import CandleBuilder
 
 log = logging.getLogger("live")
 
-# Every stored candle is stamped with the start of the period it covers.
-STAMP = {"kalshi": "start", "poly": "start"}
-PENDING_MAX = 200_000       # candles held in memory while the database is away
+WARM_BATCH = 5000           # warm markets planned per query
 
 
-class Collector(threading.Thread):
-    """Polls one venue and writes its candles."""
+def hot_spans(hot, end):
+    """Spans for the hot markets: from their coverage, less the overlap, to `end`."""
+    if not hot:
+        return []
+    rows = db.query("SELECT ticker, candles_fetched_to FROM kalshi_tracking"
+                    " WHERE ticker = ANY(%s)", (list(hot),))
+    return [(r["ticker"],
+             fetch.minute(r["candles_fetched_to"].timestamp() - settings.HOT_OVERLAP), end)
+            for r in rows]
 
-    def __init__(self, venue, stop, dry=False):
-        super().__init__(name=venue, daemon=True)
-        self.venue, self.stop, self.dry = venue, stop, dry
-        # Heartbeat = width: every candle is written, moved or not.
-        self.builder = CandleBuilder(settings.CANDLE_SECONDS,
-                                     settings.CANDLE_SECONDS, STAMP[venue])
-        self.lock = threading.Lock()
-        self.markets = {}       # key -> token
-        self.pending = []
-        self.written = 0
 
-    def track(self, markets):
-        """Swap in a new set of markets. Returns the keys that are new."""
-        with self.lock:
-            fresh = [k for k in markets if k not in self.markets]
-            gone = [k for k in self.markets if k not in markets]
-            self.markets = dict(markets)
-            for key in gone:
-                self.builder.forget(key)
-        return fresh
+def warm_spans(end, exclude):
+    """Markets that traded since their candles were last fetched, busiest first."""
+    rows = db.query("""
+        SELECT ticker, candles_fetched_to FROM kalshi_tracking
+        WHERE candles_fetched_to < volume_measured_at
+          AND candles_fetched_to < %s
+          AND NOT (ticker = ANY(%s))
+        ORDER BY activity_score DESC, ticker
+        LIMIT %s""", (fetch.stamp(end), list(exclude), WARM_BATCH))
+    return [(r["ticker"], fetch.minute(r["candles_fetched_to"].timestamp()), end) for r in rows]
 
-    def samples(self, markets):
-        """[(key, quote, trade, running volume, open interest)] right now."""
-        if self.venue == "kalshi":
-            out = []
-            for m in venues.kalshi_markets(list(markets)):
-                if m.get("status") not in ("active", "open"):
-                    continue    # closed since the last sync; nothing left to price
-                out.append((m["ticker"],) + venues.kalshi_sample(m))
-            return out
-        mids = venues.poly_midpoints(list(markets.values()))
-        # Polymarket's mid carries no size, so its candles have no volume --
-        # the same as its minute history.
-        return [(key, mids[token], None, None, None)
-                for key, token in markets.items() if token in mids]
 
-    def run(self):
-        poll = settings.POLL_SECONDS
-        due = (time.time() // poll + 1) * poll
-        while not self.stop.wait(max(0.0, due - time.time())):
-            due += poll
-            if due < time.time():           # a slow cycle; skip the missed slots
-                due = (time.time() // poll + 1) * poll
-            with self.lock:
-                markets = dict(self.markets)
-            if not markets:
-                continue
+def current_hot():
+    hot = activity.load_hot()
+    if hot is not None:
+        return hot
+    # No list in Redis (it restarted, or activity.py has not run yet): work it
+    # out the same way, without the memory of who was hot before.
+    cap, _ = activity.hot_cap()
+    return activity.pick_hot(cap)
+
+
+class Live:
+    def __init__(self, stop):
+        self.stop = stop
+        self.pool = ThreadPoolExecutor(max_workers=settings.FETCH_WORKERS,
+                                       thread_name_prefix="fetch")
+
+    def _work(self, priority, request):
+        with ratelimit.using(priority):
+            return fetch.run(request, self.stop)
+
+    def run_requests(self, priority, requests, deadline):
+        """Run planned requests, a few at a time, until done or `deadline`.
+        Returns [requests done, requests failed, candles written]."""
+        done = failed = candles = 0
+        pending = set()
+        todo = iter(requests)
+        exhausted = False
+        while True:
+            while (not exhausted and len(pending) < settings.FETCH_WORKERS * 2
+                   and time.time() < deadline and not self.stop.is_set()):
+                request = next(todo, None)
+                if request is None:
+                    exhausted = True
+                    break
+                pending.add(self.pool.submit(self._work, priority, request))
+            if not pending:
+                return [done, failed, candles]
+            finished, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+            for f in finished:
+                n = f.result()
+                if n is None:
+                    failed += 1
+                else:
+                    done += 1
+                    candles += n
+
+    def cycle(self):
+        """One minute's work. Returns the time the next one is due."""
+        started = time.time()
+        end = fetch.minute(started - settings.SETTLE_SECONDS)
+        deadline = end + 60 + settings.SETTLE_SECONDS
+
+        hot = current_hot()
+        h = self.run_requests("hot", fetch.plan(hot_spans(hot, end)), deadline)
+
+        w, warm_markets, exclude = [0, 0, 0], 0, set(hot)
+        while time.time() < deadline - 5 and not self.stop.is_set():
+            spans = warm_spans(end, exclude)
+            if not spans:
+                break
+            warm_markets += len(spans)
+            exclude.update(s[0] for s in spans)     # one try per market per cycle
+            got = self.run_requests("warm", fetch.plan(spans), deadline)
+            w = [a + b for a, b in zip(w, got)]
+
+        log.info("%s  hot %s markets: %d requests (%d failed), %s candles"
+                 " | warm %s markets: %d requests (%d failed), %s candles | %.0fs",
+                 time.strftime("%H:%M", time.gmtime(end)), f"{len(hot):,}", h[0] + h[1], h[1],
+                 f"{h[2]:,}", f"{warm_markets:,}", w[0] + w[1], w[1], f"{w[2]:,}",
+                 time.time() - started)
+        return deadline
+
+    def run(self, cycles=None):
+        n = 0
+        while not self.stop.is_set():
             try:
-                got = self.samples(markets)
+                deadline = self.cycle()
             except Exception as exc:
-                log.warning("%s poll failed: %s: %s", self.venue, type(exc).__name__, exc)
-                continue
-            now = time.time()
-            with self.lock:
-                for key, quote, trade, volume, oi in got:
-                    self.builder.add(key, now, quote, trade, volume, oi)
-                candles = self.builder.flush(now)
-            if candles:
-                self.write(candles)
-        self.write(self.builder.flush(time.time() + settings.CANDLE_SECONDS))
-
-    def write(self, candles):
-        if self.dry:
-            for key, ts, o, h, l, c, volume, oi in candles:
-                print(f"{self.venue:<6} {ts:%H:%M:%S}  {key[:44]:<44}"
-                      f"  o={o:.4f} h={h:.4f} l={l:.4f} c={c:.4f}"
-                      f"  vol={'-' if volume is None else f'{volume:g}'}", flush=True)
-            self.written += len(candles)
-            return
-        self.pending += candles
-        try:
-            store.write_candles(self.venue, self.pending)
-        except Exception as exc:
-            # Keep them for the next cycle; a database restart should not cost
-            # more than it has to.
-            del self.pending[:-PENDING_MAX]
-            log.warning("%s: %d candles waiting on the database (%s)",
-                        self.venue, len(self.pending), exc)
-            return
-        self.written += len(self.pending)
-        self.pending = []
-
-
-def dry_markets(venue, n):
-    """A handful of busy markets straight from the API, for --dry-run."""
-    if venue == "kalshi":
-        found = []
-        for (page, _), _ in zip(venues.kalshi_events("open"), range(3)):
-            for event in page:
-                found += event.get("markets") or []
-        found.sort(key=lambda m: -float(m.get("volume_24h_fp") or 0))
-        return {m["ticker"]: m["ticker"] for m in found[:n]}
-    found = []
-    for (page, _), _ in zip(venues.poly_events(), range(3)):
-        for event in page:
-            found += [m for m in event.get("markets") or [] if venues.yes_token(m)]
-    found.sort(key=lambda m: -float(m.get("volume24hr") or 0))
-    return {m["conditionId"]: venues.yes_token(m) for m in found[:n]}
-
-
-def run_backfill(collector, key):
-    try:
-        BACKFILL[collector.venue](key)
-    except Exception as exc:
-        log.warning("%s: backfill of %s failed: %s: %s", collector.venue, key,
-                    type(exc).__name__, exc)
-
-
-def retrack(collectors, pool, backfilled):
-    for venue, collector in collectors.items():
-        fresh = collector.track(store.tracked(venue))
-        todo = [k for k in fresh if (venue, k) not in backfilled]
-        backfilled.update((venue, k) for k in todo)
-        for key in todo:
-            pool.submit(run_backfill, collector, key)
-        if fresh:
-            log.info("%s: collecting %d markets (%d new, backfilling %d)",
-                     venue, len(collector.markets), len(fresh), len(todo))
-
-
-def serve(stop, prune=True, markets_only=False):
-    store.ensure_schema()
-    if markets_only:
-        discovery.run(stop, prune)
-        return
-
-    collectors = {v: Collector(v, stop) for v in settings.VENUES}
-    pool = ThreadPoolExecutor(max_workers=settings.BACKFILL_WORKERS,
-                              thread_name_prefix="backfill")
-    backfilled = set()
-
-    # Whatever the last run left in the store is good enough to start
-    # collecting on; discovery brings it up to date as it goes.
-    retrack(collectors, pool, backfilled)
-    for collector in collectors.values():
-        collector.start()
-
-    discovery.run(stop, prune, after_pass=lambda: retrack(collectors, pool, backfilled))
-
-    pool.shutdown(wait=False, cancel_futures=True)
-    for collector in collectors.values():
-        collector.join(timeout=15)
-
-
-def dry_run(stop, n, seconds):
-    collectors = {v: Collector(v, stop, dry=True) for v in settings.VENUES}
-    for venue, collector in collectors.items():
-        collector.track(dry_markets(venue, n))
-        print(f"{venue}: watching {len(collector.markets)} markets", flush=True)
-        collector.start()
-    stop.wait(seconds)
-    stop.set()
-    for collector in collectors.values():
-        collector.join(timeout=15)
-        print(f"{collector.venue}: {collector.written} candles", flush=True)
+                # The database or Redis went away mid-cycle. The bookkeeping
+                # has whatever succeeded, so just go again next minute.
+                log.warning("cycle failed: %s: %s", type(exc).__name__, exc)
+                deadline = fetch.minute(time.time()) + 60 + settings.SETTLE_SECONDS
+            n += 1
+            if cycles and n >= cycles:
+                break
+            self.stop.wait(max(0.0, deadline - time.time()))
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        log.info("stopped")
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true",
-                        help="print candles for a few markets; touches no database")
-    parser.add_argument("--markets", type=int, default=10, help="with --dry-run")
-    parser.add_argument("--seconds", type=float, default=60, help="with --dry-run")
-    parser.add_argument("--markets-only", action="store_true",
-                        help="only keep the markets store current; collect no candles")
-    parser.add_argument("--no-prune", action="store_true",
-                        help="keep expired markets instead of deleting them")
+    parser = argparse.ArgumentParser(description="Live Kalshi one-minute candles.")
+    parser.add_argument("--cycles", type=int, help="stop after this many one-minute cycles")
     args = parser.parse_args()
-
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
+    ratelimit.DEFAULT = "hot"
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
-
-    if args.dry_run:
-        dry_run(stop, args.markets, args.seconds)
-    else:
-        serve(stop, prune=not args.no_prune, markets_only=args.markets_only)
+    Live(stop).run(args.cycles)
 
 
 if __name__ == "__main__":

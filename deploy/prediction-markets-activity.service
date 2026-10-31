@@ -1,0 +1,21 @@
+# Scores every discovery scan and publishes the hot list for live.py.
+#
+# sudo cp deploy/prediction-markets-activity.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-activity
+# journalctl -u prediction-markets-activity -f
+
+[Unit]
+Description=prediction_markets activity scores
+After=network-online.target postgresql.service redis-server.service
+Requires=postgresql.service
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python activity.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
