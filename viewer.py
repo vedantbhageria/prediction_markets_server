@@ -17,7 +17,7 @@ from functools import lru_cache
 from urllib.parse import quote, urlencode
 
 import requests
-from flask import (Flask, jsonify, redirect, render_template_string,
+from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request)
 from psycopg2.extras import RealDictCursor, execute_values
 
@@ -27,6 +27,44 @@ from db import connection
 from kalshi_markets import get_candles as kalshi_get_candles
 
 app = Flask(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Login. When VIEWER_USER and VIEWER_PASSWORD_HASH are set (in .env), every
+# page asks for them; unset, the viewer is open, as for local use. Only a hash
+# of the password is stored: make one with
+#   python -c "from werkzeug.security import generate_password_hash as g; print(g('PASSWORD'))"
+# ---------------------------------------------------------------------------
+
+import os
+from werkzeug.security import check_password_hash
+
+db.load_env()
+LOGIN_USER = os.environ.get("VIEWER_USER")
+LOGIN_HASH = os.environ.get("VIEWER_PASSWORD_HASH")
+_failures = []                  # times of recent failed logins, all clients
+_failures_lock = threading.Lock()
+FAILURE_WINDOW, FAILURE_LIMIT = 300, 10
+
+
+@app.before_request
+def require_login():
+    if not (LOGIN_USER and LOGIN_HASH):
+        return None
+    auth = request.authorization
+    if auth and auth.username == LOGIN_USER and check_password_hash(LOGIN_HASH, auth.password or ""):
+        return None
+    if auth:
+        # Behind a public link every client can look the same, so failures are
+        # counted together: past the limit, every attempt waits, which makes
+        # guessing the password slow without locking the owner out.
+        now = time.time()
+        with _failures_lock:
+            _failures[:] = [t for t in _failures if now - t < FAILURE_WINDOW] + [now]
+            slow = len(_failures) > FAILURE_LIMIT
+        time.sleep(5 if slow else 1)
+    return Response("Login required.", 401,
+                    {"WWW-Authenticate": 'Basic realm="prediction_markets", charset="UTF-8"'})
 
 # Polymarket keys on condition_id where Kalshi keys on ticker.
 POLY = {"poly_events", "poly_markets", "poly_candles"}
