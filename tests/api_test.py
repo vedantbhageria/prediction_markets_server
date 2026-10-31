@@ -39,6 +39,7 @@ ENV = dict(os.environ,
            PGSCHEMA="pm_api_test", REDIS_PREFIX="pmapitest:", PM_STATE_DIR=str(WORK / "state"),
            KALSHI_API_URL=f"http://127.0.0.1:{MOCK_PORT}/trade-api/v2", LIVE_VENUES="kalshi",
            KALSHI_REQUESTS_PER_MIN="600", BACKFILL_DAYS="2", API_RATE_PER_MIN="100000",
+           API_BACKFILL_PER_MIN="1000",
            PYTHONUNBUFFERED="1")
 os.environ.update({k: ENV[k] for k in ("PGSCHEMA", "REDIS_PREFIX", "PM_STATE_DIR",
                                        "KALSHI_API_URL", "BACKFILL_DAYS")})
@@ -364,7 +365,7 @@ def test_paging_and_formats(api, tickers):
     p = pd.read_parquet(io.BytesIO(pq.content))
     for name, df in (("csv", c), ("parquet", p)):
         same = (list(df.columns) == list(j.columns) and len(df) == len(j)
-                and (df["ts"].astype("int64") // 10**9 == j["ts"].astype("int64") // 10**9).all()
+                and [x.timestamp() for x in df["ts"]] == [x.timestamp() for x in j["ts"]]
                 and all((df[k].fillna(-1) - j[k].fillna(-1)).abs().max() < 1e-9
                         for k in ("open", "high", "low", "close", "volume")))
         check(same, f"5 {name} = json ({len(df)} rows)")

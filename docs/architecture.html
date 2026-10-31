@@ -357,14 +357,14 @@
 <!-- 7 ------------------------------------------------------------------->
 <section>
   <h2><span class="n">7</span>When things go wrong</h2>
-  <p class="sub">The bookkeeping only moves after data is safely written, so every failure just means "try again".</p>
+  <p class="sub">Everything is saved as it arrives, and the bookkeeping only moves once data is written, so nothing is lost or fetched twice.</p>
   <div class="tablecard">
     <table>
       <tr><th>What happens</th><th>What the system does</th></tr>
       <tr><td>A program crashes</td><td>Restarts and carries on from the bookkeeping; nothing lost, nothing doubled.</td></tr>
-      <tr><td>Network drops out</td><td>Requests fail, nothing moves; the gap is fetched once it is back.</td></tr>
+      <tr><td>Network drops out</td><td>Every request pauses; one check every 30 s; all carry on from where they were as soon as it is back.</td></tr>
       <tr><td>Kalshi throttles</td><td>Budget halves for everyone at once, then recovers slowly.</td></tr>
-      <tr><td>Discovery stops mid-scan</td><td>Resumes from its saved page; the half scan is still scored.</td></tr>
+      <tr><td>Discovery stops mid-scan</td><td>Saves its place after every page and finishes the same scan from there.</td></tr>
       <tr><td>activity.py is down</td><td>Scans wait in order and are scored one by one when it returns.</td></tr>
       <tr><td>Redis is down</td><td>Each program falls back to a third of the budget; live works out the hot list itself.</td></tr>
       <tr><td>Server off for days</td><td>Discovery re-imports the closed markets; live catches up; backfill fills the rest.</td></tr>
@@ -416,6 +416,7 @@
       <tr><td>Scores in PostgreSQL</td><td>One statement scores 185k markets in about 3 s — no need for Rust or C++.</td></tr>
       <tr><td>Separate programs</td><td>Each can be stopped, restarted or rerun as a data fixer on its own.</td></tr>
       <tr><td>REST, not WebSocket</td><td>The WebSocket needs an API key; REST with a budget covers it for now.</td></tr>
+      <tr><td>No Redis buffer</td><td>PostgreSQL is on the same machine; outages are to Kalshi, so there is nothing to buffer.</td></tr>
     </table>
   </div>
 </section>
