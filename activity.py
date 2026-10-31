@@ -77,6 +77,7 @@ ORDER BY o.ticker, o.answered_at DESC
 """
 
 # First sighting.
+#   already over   as BOOTSTRAP_CLOSED: nothing after close_time to fetch
 #   never traded   complete from the open up to the reading
 #   opened lately  live.py fetches it all, from the open
 #   otherwise      live.py takes it from here, backfill.py fills what came before
@@ -84,18 +85,25 @@ SEED = f"""
 INSERT INTO kalshi_tracking (ticker, volume, volume_measured_at, activity_score,
                              candles_fetched_from, candles_fetched_to)
 SELECT o.ticker, o.volume,
-       CASE WHEN o.volume = 0 THEN o.asked_at ELSE o.answered_at END,
-       CASE WHEN m.open_time IS NULL THEN 0
+       CASE WHEN o.over THEN m.close_time
+            WHEN o.volume = 0 THEN o.asked_at ELSE o.answered_at END,
+       CASE WHEN o.over OR m.open_time IS NULL THEN 0
             ELSE o.volume / GREATEST(EXTRACT(EPOCH FROM o.answered_at - m.open_time) / 60, 1) END,
-       CASE WHEN o.volume = 0 THEN LEAST(COALESCE(m.open_time, o.asked_at), o.asked_at)
+       CASE WHEN o.over AND o.volume = 0 THEN COALESCE(LEAST(m.open_time, m.close_time),
+                                                      m.close_time)
+            WHEN o.over THEN m.close_time
+            WHEN o.volume = 0 THEN LEAST(COALESCE(m.open_time, o.asked_at), o.asked_at)
             WHEN m.open_time > o.asked_at - %(new)s * interval '1 hour'
                  THEN date_trunc('minute', m.open_time)
             ELSE o.asked_at END,
-       CASE WHEN o.volume = 0 THEN o.asked_at
+       CASE WHEN o.over THEN m.close_time
+            WHEN o.volume = 0 THEN o.asked_at
             WHEN m.open_time > o.asked_at - %(new)s * interval '1 hour'
                  THEN date_trunc('minute', m.open_time)
             ELSE o.asked_at END
-FROM ({LATEST}) o JOIN kalshi_markets m USING (ticker)
+FROM (SELECT l.*, (m2.status = ANY(%(finished)s) AND m2.close_time <= l.asked_at) AS over
+      FROM ({LATEST}) l JOIN kalshi_markets m2 USING (ticker)) o
+JOIN kalshi_markets m USING (ticker)
 ON CONFLICT (ticker) DO NOTHING
 """
 
