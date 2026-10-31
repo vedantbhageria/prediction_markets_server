@@ -27,14 +27,18 @@ sys.path.insert(0, str(ROOT))
 import ratelimit              # noqa: E402
 
 
-def worker(seconds, out):
+def worker(start, end, out):
+    """Hammer from `start` to `end` (unix time). A thread still waiting at the
+    end is let go by `stop` and takes nothing, so every grant is inside."""
     grants = []
-    stop_at = time.time() + seconds
+    stop = threading.Event()
+    time.sleep(max(0.0, start - time.time()))
+    threading.Timer(end - time.time(), stop.set).start()
 
     def hammer(priority):
         with ratelimit.using(priority):
-            while time.time() < stop_at:
-                if ratelimit.acquire():
+            while not stop.is_set():
+                if ratelimit.acquire(stop):
                     grants.append((time.time(), priority))
 
     threads = [threading.Thread(target=hammer, args=(p,))
@@ -57,8 +61,9 @@ def worst_window(times, width=60):
 
 def phase(seconds, tag):
     files = [f"/tmp/pmrate_{tag}_{i}.json" for i in range(3)]
-    procs = [subprocess.Popen([sys.executable, __file__, "--worker", str(seconds), f])
-             for f in files]
+    start = time.time() + 3             # all three begin together
+    procs = [subprocess.Popen([sys.executable, __file__, "--worker", str(start),
+                               str(start + seconds), f]) for f in files]
     for p in procs:
         p.wait()
     grants = [g for f in files for g in json.loads(Path(f).read_text())]
@@ -98,6 +103,6 @@ def main():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
-        worker(float(sys.argv[2]), sys.argv[3])
+        worker(float(sys.argv[2]), float(sys.argv[3]), sys.argv[4])
     else:
         sys.exit(main())
