@@ -145,9 +145,11 @@ def score_scan(scan):
             readings = cur.fetchone()[0]
             cur.execute(MOVED, args)
             moved = cur.fetchone()[0]
+            # Markets already tracked first, then the new ones -- the other way
+            # round, a new market would be scored twice off one reading.
+            cur.execute(SCORE, args)
             cur.execute(SEED, args)
             new = cur.rowcount
-            cur.execute(SCORE, args)
             cur.execute(BOOTSTRAP_CLOSED, args)
             new += cur.rowcount
             cur.execute("DELETE FROM kalshi_observations WHERE scan_id = %(scan)s", args)
