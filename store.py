@@ -78,14 +78,8 @@ def ensure_schema():
             # changed, so covering all of history costs nothing extra -- and it
             # means deleting a market's candles also removes its rollups.
             for view, end, every in ROLLUPS:
-                cur.execute("""
-                    SELECT j.job_id FROM timescaledb_information.jobs j
-                    JOIN timescaledb_information.continuous_aggregates c
-                      ON c.materialization_hypertable_name = j.hypertable_name
-                    WHERE c.view_name = %s
-                      AND j.proc_name = 'policy_refresh_continuous_aggregate'""", (view,))
-                for (job,) in cur.fetchall():
-                    cur.execute("SELECT delete_job(%s)", (job,))
+                cur.execute("SELECT remove_continuous_aggregate_policy(%s, if_exists => true)",
+                            (view,))
                 cur.execute("SELECT add_continuous_aggregate_policy(%s,"
                             " start_offset => NULL, end_offset => %s::interval,"
                             " schedule_interval => %s::interval)", (view, end, every))
