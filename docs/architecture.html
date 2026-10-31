@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prediction Markets Server</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #16181d; --muted: #5d6470; --line: #e3e6eb;
+    --soft: #eef1f5; --accent: #3b5bdb; --accent-soft: #e7ecff;
+    --hot: #e8590c; --hot-soft: #fff0e6; --warm: #e0a800; --warm-soft: #fff8db;
+    --cold: #1c7ed6; --cold-soft: #e7f3ff; --ok: #2b8a3e; --ok-soft: #e6f6ea;
+    --bad: #c92a2a; --bad-soft: #ffeceb; --kalshi: #0b7285; --kalshi-soft: #e3f7fa;
+    --db: #6741d9; --db-soft: #f0ebff; --you: #2b8a3e; --you-soft: #e6f6ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --card: #171a21; --ink: #eceef2; --muted: #9aa3b2; --line: #2a2f3a;
+      --soft: #1e222b; --accent: #8ea2ff; --accent-soft: #232b4a;
+      --hot: #ff8a4c; --hot-soft: #3a2316; --warm: #ffd43b; --warm-soft: #352d10;
+      --cold: #74c0fc; --cold-soft: #13293d; --ok: #69db7c; --ok-soft: #15301c;
+      --bad: #ff8787; --bad-soft: #3a1a1a; --kalshi: #66d9e8; --kalshi-soft: #0f2d33;
+      --db: #b197fc; --db-soft: #261d42; --you: #69db7c; --you-soft: #15301c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #171a21; --ink: #eceef2; --muted: #9aa3b2; --line: #2a2f3a;
+    --soft: #1e222b; --accent: #8ea2ff; --accent-soft: #232b4a;
+    --hot: #ff8a4c; --hot-soft: #3a2316; --warm: #ffd43b; --warm-soft: #352d10;
+    --cold: #74c0fc; --cold-soft: #13293d; --ok: #69db7c; --ok-soft: #15301c;
+    --bad: #ff8787; --bad-soft: #3a1a1a; --kalshi: #66d9e8; --kalshi-soft: #0f2d33;
+    --db: #b197fc; --db-soft: #261d42; --you: #69db7c; --you-soft: #15301c;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 56px 20px 96px; }
+  header { margin-bottom: 56px; }
+  .eyebrow { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 13px; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.15; margin: 10px 0 14px; letter-spacing: -.02em; }
+  .lede { color: var(--muted); font-size: 18px; max-width: 680px; margin: 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-top: 32px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; }
+  .stat b { display: block; font-size: 26px; letter-spacing: -.01em; }
+  .stat span { color: var(--muted); font-size: 14px; }
+  section { margin-top: 72px; }
+  h2 { font-size: 24px; margin: 0 0 6px; letter-spacing: -.01em; display: flex; align-items: center; gap: 12px; }
+  h2 .n { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 10px;
+          background: var(--accent-soft); color: var(--accent); font-size: 15px; flex: none; }
+  .sub { color: var(--muted); margin: 0 0 24px 44px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 24px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); }
+  .item { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; }
+  .item h3 { margin: 0 0 4px; font-size: 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .item p { margin: 0; color: var(--muted); font-size: 15px; }
+  .pill { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: var(--soft); color: var(--muted); white-space: nowrap; }
+  .pill.hot { background: var(--hot-soft); color: var(--hot); }
+  .pill.warm { background: var(--warm-soft); color: var(--warm); }
+  .pill.cold { background: var(--cold-soft); color: var(--cold); }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .pill.db { background: var(--db-soft); color: var(--db); }
+  code { font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--soft); padding: 1px 6px; border-radius: 6px; }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: inherit; }
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; overflow-x: auto; }
+  /* On a phone the diagrams keep a readable size and scroll sideways in their card. */
+  .fig svg { min-width: 640px; }
+  .formula { background: var(--soft); border-radius: 14px; padding: 18px 20px; margin-top: 14px;
+             font: 15px/1.9 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-x: auto; }
+  .formula .c { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  td, th { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .tablecard { background: var(--card); border: 1px solid var(--line); border-radius: 18px; overflow-x: auto; }
+  .check { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  .check li { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 18px 14px 52px; position: relative; }
+  .check li::before { content: ""; position: absolute; left: 18px; top: 17px; width: 20px; height: 20px; border-radius: 6px; }
+  .check li.done::before { background: var(--ok); mask: none; }
+  .check li.done::after { content: "✓"; position: absolute; left: 22px; top: 13px; color: var(--card); font-weight: 800; }
+  .check li.todo::before { border: 2px solid var(--line); }
+  .check li span { color: var(--muted); display: block; font-size: 14px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 4px; margin-right: 6px; vertical-align: -1px; }
+  footer { margin-top: 80px; color: var(--muted); font-size: 14px; text-align: center; }
+  @media (max-width: 560px) {
+    .wrap { padding: 36px 16px 72px; }
+    .sub { margin-left: 0; }
+    td:first-child { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Architecture · kept up to date</div>
+  <h1>Prediction markets server</h1>
+  <p class="lede">A 24/7 Ubuntu machine that keeps every Kalshi market from the last 30 days, with one-minute trade candles, a viewer and an API.</p>
+  <div class="stats">
+    <div class="stat"><b>~185,000</b><span>Kalshi markets open right now</span></div>
+    <div class="stat"><b>2.87 million</b><span>markets stored (open + closed in 30 days)</span></div>
+    <div class="stat"><b>1 minute</b><span>candle size, rolled up to 5m · 15m · 1h</span></div>
+    <div class="stat"><b>240 / min</b><span>Kalshi requests, shared by every program</span></div>
+  </div>
+</header>
+
+<!-- 1 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">1</span>The big picture</h2>
+  <p class="sub">Kalshi in, four programs, one database, two ways to look at it.</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 430" role="img" aria-label="Kalshi feeds four programs that write to PostgreSQL; the viewer and API read it; you reach them over Tailscale">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+      <!-- Kalshi -->
+      <rect x="20" y="150" width="150" height="120" rx="18" fill="var(--kalshi-soft)" stroke="var(--kalshi)" stroke-width="2"/>
+      <text x="95" y="200" text-anchor="middle" font-size="20" font-weight="700" fill="var(--kalshi)">Kalshi</text>
+      <text x="95" y="226" text-anchor="middle" font-size="13" fill="var(--muted)">public API</text>
+      <!-- programs -->
+      <g font-size="15">
+        <rect x="250" y="40" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="270" y="68" font-weight="700" fill="var(--ink)">discover.py</text>
+        <text x="270" y="90" font-size="13" fill="var(--muted)">finds markets · every 15 min</text>
+
+        <rect x="250" y="130" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="270" y="158" font-weight="700" fill="var(--ink)">activity.py</text>
+        <text x="270" y="180" font-size="13" fill="var(--muted)">scores busy-ness · after scans</text>
+
+        <rect x="250" y="220" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="270" y="248" font-weight="700" fill="var(--ink)">live.py</text>
+        <text x="270" y="270" font-size="13" fill="var(--muted)">new candles · every minute</text>
+
+        <rect x="250" y="310" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="270" y="338" font-weight="700" fill="var(--ink)">backfill.py</text>
+        <text x="270" y="360" font-size="13" fill="var(--muted)">history &amp; repairs · by hand</text>
+      </g>
+      <!-- arrows kalshi -> programs -->
+      <path d="M170 190 C 210 190, 210 73, 248 73" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M170 225 C 210 225, 210 253, 248 253" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M170 240 C 210 240, 210 343, 248 343" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <!-- budget badge -->
+      <rect x="138" y="388" width="200" height="30" rx="15" fill="var(--warm-soft)"/>
+      <text x="238" y="408" text-anchor="middle" font-size="13" font-weight="600" fill="var(--warm)">one shared request budget</text>
+      <!-- DB -->
+      <g>
+        <ellipse cx="610" cy="140" rx="80" ry="20" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+        <path d="M530 140 v150 a80 20 0 0 0 160 0 v-150" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+        <ellipse cx="610" cy="140" rx="80" ry="20" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+        <text x="610" y="215" text-anchor="middle" font-size="16" font-weight="700" fill="var(--db)">PostgreSQL</text>
+        <text x="610" y="238" text-anchor="middle" font-size="13" fill="var(--muted)">+ TimescaleDB</text>
+        <text x="610" y="258" text-anchor="middle" font-size="13" fill="var(--muted)">+ Redis beside it</text>
+      </g>
+      <path d="M450 73 C 495 73, 500 160, 528 175" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M452 163 L 528 200" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)" marker-start="url(#arr)"/>
+      <path d="M452 253 L 528 235" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M450 343 C 495 343, 500 280, 528 265" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <!-- readers -->
+      <rect x="740" y="120" width="140" height="56" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="810" y="144" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">viewer</text>
+      <text x="810" y="164" text-anchor="middle" font-size="12" fill="var(--muted)">browser, login</text>
+      <rect x="740" y="200" width="140" height="56" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="810" y="224" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">API</text>
+      <text x="810" y="244" text-anchor="middle" font-size="12" fill="var(--muted)">FastAPI · /health</text>
+      <path d="M690 180 L 738 150" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M690 215 L 738 226" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <!-- you -->
+      <rect x="740" y="300" width="140" height="70" rx="14" fill="var(--you-soft)" stroke="var(--you)" stroke-width="2"/>
+      <text x="810" y="328" text-anchor="middle" font-size="15" font-weight="700" fill="var(--you)">you</text>
+      <text x="810" y="350" text-anchor="middle" font-size="12" fill="var(--muted)">laptop · iPad</text>
+      <path d="M810 298 L 810 258" fill="none" stroke="var(--you)" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arr)"/>
+      <text x="822" y="285" font-size="12" fill="var(--you)">Tailscale</text>
+    </svg>
+  </div>
+</section>
+
+<!-- 2 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">2</span>The machine and how you reach it</h2>
+  <p class="sub">One PC on the office network, reachable only through your own devices.</p>
+  <div class="grid">
+    <div class="item"><h3>Ubuntu Server LTS</h3><p>8 cores, 44 GB RAM, 500 GB NVMe; RAM tested, idle power-saving off.</p></div>
+    <div class="item"><h3>Tailscale</h3><p>Private network between server, laptop and iPad — server is <code>100.106.150.105</code>.</p></div>
+    <div class="item"><h3>SSH with keys</h3><p>Laptop and iPad (Termius) log in with keys, no password needed.</p></div>
+    <div class="item"><h3>Encrypted DNS</h3><p>Cloudflare DNS over TLS, because the office network refuses normal lookups.</p></div>
+    <div class="item"><h3>Public viewer link <span class="pill warm">waiting</span></h3><p>Tailscale Funnel is on; its certificate needs the server to reach Let's Encrypt.</p></div>
+    <div class="item"><h3>Git deploy</h3><p>Push from the laptop to the server's bare repo and the code updates itself.</p></div>
+  </div>
+</section>
+
+<!-- 3 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">3</span>The programs</h2>
+  <p class="sub">Each one starts, stops and restarts on its own — none waits for another.</p>
+  <div class="grid">
+    <div class="item"><h3>discover.py <span class="pill">every 15 min</span></h3><p>Lists every open market, imports newly closed ones, deletes those over 30 days old.</p></div>
+    <div class="item"><h3>activity.py <span class="pill">after each scan</span></h3><p>Turns each scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
+    <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
+    <div class="item"><h3>backfill.py <span class="pill">by hand</span></h3><p>Fills old history, reports coverage, checks candles against volumes, repairs.</p></div>
+    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer, same look as before, behind a username and password.</p></div>
+    <div class="item"><h3>api/ <span class="pill">backbone</span></h3><p>FastAPI on uvicorn; only <code>/health</code> for now, endpoints come later.</p></div>
+  </div>
+</section>
+
+<!-- 4 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">4</span>Where the data lives</h2>
+  <p class="sub">Every fact in one table, each linked to the one above it.</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 250" role="img" aria-label="Kalshi chain series, events, markets, candles; Polymarket events, markets, candles">
+      <defs>
+        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+      <text x="20" y="30" font-size="13" font-weight="700" fill="var(--kalshi)" letter-spacing="1">KALSHI</text>
+      <g font-size="15" font-weight="700">
+        <rect x="20" y="45" width="180" height="60" rx="14" fill="var(--kalshi-soft)"/>
+        <text x="110" y="72" text-anchor="middle" fill="var(--ink)">series</text>
+        <text x="110" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">repeating template</text>
+        <rect x="245" y="45" width="180" height="60" rx="14" fill="var(--kalshi-soft)"/>
+        <text x="335" y="72" text-anchor="middle" fill="var(--ink)">events</text>
+        <text x="335" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">one instance of it</text>
+        <rect x="470" y="45" width="180" height="60" rx="14" fill="var(--kalshi-soft)"/>
+        <text x="560" y="72" text-anchor="middle" fill="var(--ink)">markets</text>
+        <text x="560" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">one yes/no contract</text>
+        <rect x="695" y="45" width="185" height="60" rx="14" fill="var(--kalshi-soft)"/>
+        <text x="787" y="72" text-anchor="middle" fill="var(--ink)">candles</text>
+        <text x="787" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">traded minutes only</text>
+      </g>
+      <path d="M200 75 H243" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M425 75 H468" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M650 75 H693" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <!-- tracking hangs off markets -->
+      <path d="M560 105 V140" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <rect x="470" y="142" width="180" height="40" rx="12" fill="var(--warm-soft)"/>
+      <text x="560" y="167" text-anchor="middle" font-size="14" font-weight="700" fill="var(--warm)">tracking</text>
+      <text x="30" y="170" font-size="13" fill="var(--muted)">rolled up automatically →</text>
+      <g font-size="13" font-weight="600">
+        <rect x="695" y="125" width="56" height="30" rx="9" fill="var(--soft)"/><text x="723" y="145" text-anchor="middle" fill="var(--ink)">5m</text>
+        <rect x="759" y="125" width="56" height="30" rx="9" fill="var(--soft)"/><text x="787" y="145" text-anchor="middle" fill="var(--ink)">15m</text>
+        <rect x="823" y="125" width="56" height="30" rx="9" fill="var(--soft)"/><text x="851" y="145" text-anchor="middle" fill="var(--ink)">1h</text>
+      </g>
+      <path d="M787 105 V123" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <text x="20" y="215" font-size="13" font-weight="700" fill="var(--muted)" letter-spacing="1">POLYMARKET</text>
+      <g font-size="14" fill="var(--muted)">
+        <rect x="245" y="198" width="180" height="40" rx="12" fill="var(--soft)"/><text x="335" y="223" text-anchor="middle">events</text>
+        <rect x="470" y="198" width="180" height="40" rx="12" fill="var(--soft)"/><text x="560" y="223" text-anchor="middle">markets</text>
+        <rect x="695" y="198" width="185" height="40" rx="12" fill="var(--soft)"/><text x="787" y="223" text-anchor="middle">candles</text>
+      </g>
+      <path d="M425 218 H468" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M650 218 H693" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+    </svg>
+  </div>
+  <div class="tablecard" style="margin-top:14px">
+    <table>
+      <tr><th>Table</th><th>What it holds</th></tr>
+      <tr><td><code>kalshi_markets</code></td><td>Every market open now or closed in the last 30 days, exactly as Kalshi sends it.</td></tr>
+      <tr><td><code>kalshi_candles</code></td><td>One row per market per minute <i>with a trade</i>; quiet minutes are filled in when read.</td></tr>
+      <tr><td><code>kalshi_tracking</code></td><td>Per market: last volume, when it was read, activity score, and which minutes are fetched.</td></tr>
+      <tr><td><code>kalshi_scans</code></td><td>One row per discovery scan, so activity.py scores each exactly once.</td></tr>
+      <tr><td><code>kalshi_observations</code></td><td>Hand-off from discover to activity: each market's volume and when it was true.</td></tr>
+      <tr><td><code>*_5m / *_15m / *_1h</code></td><td>TimescaleDB rollups that refresh themselves and include the newest minutes.</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- 5 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">5</span>How live candles work</h2>
+  <p class="sub">Spend requests only where trades are happening.</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 300" role="img" aria-label="Scan reads volumes, activity scores them, markets are sorted into hot, warm and cold">
+      <defs>
+        <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+      <rect x="20" y="110" width="170" height="80" rx="16" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="105" y="143" text-anchor="middle" font-size="16" font-weight="700" fill="var(--ink)">1 · scan</text>
+      <text x="105" y="166" text-anchor="middle" font-size="13" fill="var(--muted)">every market's volume</text>
+      <rect x="245" y="110" width="170" height="80" rx="16" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="330" y="143" text-anchor="middle" font-size="16" font-weight="700" fill="var(--ink)">2 · score</text>
+      <text x="330" y="166" text-anchor="middle" font-size="13" fill="var(--muted)">contracts per minute</text>
+      <path d="M190 150 H243" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr3)"/>
+      <path d="M415 150 C 450 150, 455 55, 488 55" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr3)"/>
+      <path d="M415 150 H488" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr3)"/>
+      <path d="M415 150 C 450 150, 455 245, 488 245" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr3)"/>
+      <rect x="490" y="20" width="390" height="72" rx="16" fill="var(--hot-soft)"/>
+      <text x="512" y="50" font-size="16" font-weight="700" fill="var(--hot)">HOT · score ≥ 1</text>
+      <text x="512" y="74" font-size="13" fill="var(--ink)">fetched every minute (stays hot until below 0.5)</text>
+      <rect x="490" y="114" width="390" height="72" rx="16" fill="var(--warm-soft)"/>
+      <text x="512" y="144" font-size="16" font-weight="700" fill="var(--warm)">WARM · traded since last fetch</text>
+      <text x="512" y="168" font-size="13" fill="var(--ink)">fetched once, in the spare seconds of each minute</text>
+      <rect x="490" y="208" width="390" height="72" rx="16" fill="var(--cold-soft)"/>
+      <text x="512" y="238" font-size="16" font-weight="700" fill="var(--cold)">COLD · volume unchanged</text>
+      <text x="512" y="262" font-size="13" fill="var(--ink)">no request at all — marked complete for free</text>
+    </svg>
+  </div>
+  <div class="formula">
+    <span class="c">new market</span>     score = total volume ÷ minutes since it opened<br>
+    <span class="c">every scan</span>     rate  = Δvolume ÷ Δminutes<br>
+    <span class="c">          </span>     score = score + (1 − 2<sup>−Δminutes/60</sup>) × (rate − score)   <span class="c">← one-hour half-life</span>
+  </div>
+  <div class="grid" style="margin-top:14px">
+    <div class="item"><h3>Trades only</h3><p>Minutes with quotes but no trade are dropped; nothing is invented.</p></div>
+    <div class="item"><h3>Late trades caught</h3><p>A minute is read 60 s after it ends; hot markets re-read the last 2 minutes.</p></div>
+    <div class="item"><h3>No-change proof</h3><p>Each reading keeps its ask and answer times, so "unchanged" can never hide a trade.</p></div>
+    <div class="item"><h3>History</h3><p>backfill.py goes newest-first back to the open (or 30 days); never-traded markets cost nothing.</p></div>
+  </div>
+</section>
+
+<!-- 6 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">6</span>Staying inside Kalshi's limit</h2>
+  <p class="sub">One bucket of request tokens in Redis; every program draws from it.</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 230" role="img" aria-label="A token bucket shared by discover, live hot, live warm and backfill, in priority order">
+      <path d="M60 40 V170 a20 20 0 0 0 20 20 H260 a20 20 0 0 0 20 -20 V40" fill="none" stroke="var(--ink)" stroke-width="3"/>
+      <rect x="64" y="95" width="212" height="91" rx="14" fill="var(--accent-soft)"/>
+      <text x="170" y="138" text-anchor="middle" font-size="16" font-weight="700" fill="var(--accent)">240 tokens / min</text>
+      <text x="170" y="162" text-anchor="middle" font-size="13" fill="var(--muted)">refills steadily</text>
+      <text x="170" y="28" text-anchor="middle" font-size="13" fill="var(--muted)">shared bucket (Redis)</text>
+      <g font-size="15">
+        <rect x="350" y="20" width="250" height="40" rx="12" fill="var(--soft)"/>
+        <text x="370" y="46" font-weight="700" fill="var(--ink)">1 · discover</text><text x="580" y="46" text-anchor="end" font-size="13" fill="var(--muted)">first</text>
+        <rect x="350" y="70" width="250" height="40" rx="12" fill="var(--hot-soft)"/>
+        <text x="370" y="96" font-weight="700" fill="var(--hot)">2 · live, hot</text><text x="580" y="96" text-anchor="end" font-size="13" fill="var(--muted)">first</text>
+        <rect x="350" y="120" width="250" height="40" rx="12" fill="var(--warm-soft)"/>
+        <text x="370" y="146" font-weight="700" fill="var(--warm)">3 · live, warm</text><text x="580" y="146" text-anchor="end" font-size="13" fill="var(--muted)">then</text>
+        <rect x="350" y="170" width="250" height="40" rx="12" fill="var(--soft)"/>
+        <text x="370" y="196" font-weight="700" fill="var(--muted)">4 · backfill</text><text x="580" y="196" text-anchor="end" font-size="13" fill="var(--muted)">leftovers</text>
+      </g>
+      <path d="M282 120 H346" stroke="var(--muted)" stroke-width="2" stroke-dasharray="4 5"/>
+      <rect x="640" y="40" width="240" height="150" rx="16" fill="var(--bad-soft)"/>
+      <text x="760" y="80" text-anchor="middle" font-size="16" font-weight="700" fill="var(--bad)">Kalshi says 429</text>
+      <text x="760" y="110" text-anchor="middle" font-size="14" fill="var(--ink)">budget halves for everyone</text>
+      <text x="760" y="134" text-anchor="middle" font-size="14" fill="var(--ink)">+10% back per quiet 10 min</text>
+      <text x="760" y="166" text-anchor="middle" font-size="13" fill="var(--muted)">Redis down → each takes ⅓</text>
+    </svg>
+  </div>
+  <div class="grid" style="margin-top:14px">
+    <div class="item"><h3>Hard ceiling</h3><p>No 60-second window can ever exceed the budget, however many programs run.</p></div>
+    <div class="item"><h3>Hot cap</h3><p>Hot list size = 100 × (budget − headroom − discovery − warm), recomputed every scan.</p></div>
+    <div class="item"><h3>Batch candles</h3><p>Up to 100 markets and 10,000 market-minutes per request, packed automatically.</p></div>
+  </div>
+</section>
+
+<!-- 7 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">7</span>When things go wrong</h2>
+  <p class="sub">The bookkeeping only moves after data is safely written, so every failure just means "try again".</p>
+  <div class="tablecard">
+    <table>
+      <tr><th>What happens</th><th>What the system does</th></tr>
+      <tr><td>A program crashes</td><td>Restarts and carries on from the bookkeeping; nothing lost, nothing doubled.</td></tr>
+      <tr><td>Network drops out</td><td>Requests fail, nothing moves; the gap is fetched once it is back.</td></tr>
+      <tr><td>Kalshi throttles</td><td>Budget halves for everyone at once, then recovers slowly.</td></tr>
+      <tr><td>Discovery stops mid-scan</td><td>Resumes from its saved page; the half scan is still scored.</td></tr>
+      <tr><td>activity.py is down</td><td>Scans wait in order and are scored one by one when it returns.</td></tr>
+      <tr><td>Redis is down</td><td>Each program falls back to a third of the budget; live works out the hot list itself.</td></tr>
+      <tr><td>Server off for days</td><td>Discovery re-imports the closed markets; live catches up; backfill fills the rest.</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- 8 ------------------------------------------------------------------->
+<section id="tests">
+  <h2><span class="n">8</span>Tested</h2>
+  <p class="sub">Against a simulated Kalshi with known trades, so every candle can be checked exactly.</p>
+  <ul class="check">
+    <li class="done">Activity rules, case by case<span>11 cases: new, closed, quiet chains, late coverage, averages, odd readings — all pass.</span></li>
+    <li class="done">Shared budget under three processes<span>Busiest 60 s held exactly 120 of 120; after a 429 the rate halved; hot always went first.</span></li>
+    <li class="done">Database upgrade<span>Old layout with <code>filled</code> upgraded in place; candles kept; rollups rebuilt.</span></li>
+    <li class="done" id="e2e">30-minute end-to-end run with faults<span>RESULT_PLACEHOLDER</span></li>
+  </ul>
+</section>
+
+<!-- 9 ------------------------------------------------------------------->
+<section>
+  <h2><span class="n">9</span>Still to do</h2>
+  <p class="sub">In rough order.</p>
+  <ul class="check">
+    <li class="todo">Switch the server to the new programs<span>Install the discover, activity, live, viewer and API services (needs sudo).</span></li>
+    <li class="todo">Run the first full backfill<span>Tens of thousands of requests; runs in the background on leftover budget.</span></li>
+    <li class="todo">Harden access<span>Turn off SSH passwords; turn off Tailscale key expiry for the server.</span></li>
+    <li class="todo">Reliable internet<span>Office Wi-Fi blocks lookups and drops out; a 4G/5G router or registered network would fix it.</span></li>
+    <li class="todo">Fill-on-read for quiet minutes<span>Carry the last price forward when candles are read, not stored.</span></li>
+    <li class="todo">Derived data and the viewer's panels<span>Strike, dates, related wording, nearby markets.</span></li>
+    <li class="todo">API endpoints, backups, Polymarket<span>Polymarket is blocked on this network; its tables wait.</span></li>
+  </ul>
+</section>
+
+<!-- 10 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">10</span>Decisions we made</h2>
+  <p class="sub">The short reason behind each choice.</p>
+  <div class="tablecard">
+    <table>
+      <tr><th>Decision</th><th>Why</th></tr>
+      <tr><td>1-minute candles</td><td>Kalshi's own resolution; 5-second polling broke the rate limit.</td></tr>
+      <tr><td>Only traded minutes</td><td>Storing empty minutes would cost ~260 million rows a day for nothing.</td></tr>
+      <tr><td>30-day window</td><td>Markets open now or closed in the last 30 days; older ones are deleted.</td></tr>
+      <tr><td>Venue data only</td><td>Columns for derived data exist but stay empty until we fill them.</td></tr>
+      <tr><td>No copied columns</td><td>A market's category and series are read from its event, not duplicated.</td></tr>
+      <tr><td>Scores in PostgreSQL</td><td>One statement scores 185k markets in about 3 s — no need for Rust or C++.</td></tr>
+      <tr><td>Separate programs</td><td>Each can be stopped, restarted or rerun as a data fixer on its own.</td></tr>
+      <tr><td>REST, not WebSocket</td><td>The WebSocket needs an API key; REST with a budget covers it for now.</td></tr>
+    </table>
+  </div>
+</section>
+
+<footer>prediction_markets_server · docs/architecture.html · updated UPDATED_PLACEHOLDER</footer>
+</div>
+</body>
+</html>

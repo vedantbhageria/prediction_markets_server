@@ -3,30 +3,60 @@
 Kalshi and Polymarket market data in PostgreSQL, with a browser viewer for
 comparing the same question across both venues.
 
-## Market discovery
+The whole design on one page: [`docs/architecture.html`](docs/architecture.html).
+
+## Collection: four programs
 
 ```bash
-python live.py --markets-only   # keep the markets store current; no candles
+python discover.py      # markets store, every 15 min        (service)
+python activity.py      # scores each scan, picks hot list   (service)
+python live.py          # one-minute candles, every minute   (service)
+python backfill.py      # history and repairs                (by hand)
 ```
 
-Every `MARKET_SYNC_MINUTES` (default 15) it lists every open market on both
-venues, imports markets that closed since the last pass, and deletes markets
-that closed more than `MARKET_RETENTION_DAYS` (default 30) ago. The first pass
-imports everything closed within that window. Only the venues' own values are
-stored; the columns for derived data stay empty for now.
+**discover.py** lists every open market every `MARKET_SYNC_MINUTES` (default
+15), imports markets that closed since the last pass, and deletes markets that
+closed more than `MARKET_RETENTION_DAYS` (default 30) ago. Each pass is also a
+scan: every Kalshi market's volume, and when it was read, goes to
+`kalshi_observations`. Progress is saved in `data/state/discovery.json`.
 
-Progress is saved in `data/state/discovery.json`, so a restart resumes an
-interrupted import from its last page and only re-reads the time it was down.
-`deploy/prediction-markets-discovery.service` runs it under systemd.
+**activity.py** scores each finished scan inside PostgreSQL: a smoothed
+contracts-per-minute rate with a one-hour half-life, seeded for new markets
+with total volume / time open. A market whose volume did not move had no
+trades, so its candles are marked complete without a request. The busiest
+markets, as many as the request budget can fetch every minute, go on the hot
+list in Redis.
+
+**live.py** fetches the hot markets every minute, then every market that traded
+since its last fetch. Only minutes with a trade are stored.
+
+**backfill.py** fills history back to each market's open (or `BACKFILL_DAYS`):
+
+```bash
+python backfill.py --report            # coverage, no downloads
+python backfill.py --verify            # candle volumes vs market volumes
+python backfill.py --verify --repair   # re-download what does not match
+python backfill.py --ticker T --refetch --from 2026-10-20 --to 2026-10-21
+```
+
+Every Kalshi request from every program comes out of one budget,
+`KALSHI_REQUESTS_PER_MIN` (default 240), shared through Redis
+(`ratelimit.py`): no 60 s window can exceed it, hot markets go first, backfill
+gets what is left, and a 429 halves it for everyone.
 
 ```
-live.py        entry point (discovery, and later live candles)
-discovery.py   the pass schedule and its saved progress
+discover.py    the pass schedule and its saved progress
+activity.py    scores, the cold-market rule, the hot list
+live.py        the one-minute loop
+backfill.py    history, --report, --verify, --refetch
+fetch.py       batch candle requests: plan, fetch, store, book-keep
+ratelimit.py   the shared request budget
 catalogue.py   one venue listing -> series / events / markets rows
 venues.py      the Kalshi and Polymarket calls
 store.py       schema setup, upserts, pruning, candle writes
-settings.py    every tunable, read from .env (listed in .env.example)
+settings.py    every tunable, read from .env
 schema.sql     tables; timescale.sql adds hypertables and rollups
+tests/         mock Kalshi, end-to-end run, activity and rate-limit tests
 ```
 
 It creates the tables itself and **deletes markets that closed more than
