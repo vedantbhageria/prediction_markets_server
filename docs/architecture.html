@@ -227,8 +227,8 @@
     <div class="item"><h3>discover.py <span class="pill">every 15 min</span></h3><p>Lists every open market, imports newly closed ones, deletes those over 30 days old.</p></div>
     <div class="item"><h3>activity.py <span class="pill">after each scan</span></h3><p>Turns each scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
     <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
-    <div class="item"><h3>backfill.py <span class="pill">by hand</span></h3><p>Fills old history, reports coverage, checks candles against volumes, repairs.</p></div>
-    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer, same look as before, behind a username and password.</p></div>
+    <div class="item"><h3>backfill.py <span class="pill warm">running</span></h3><p>Fills old history on leftover budget, reports coverage, checks candles against volumes, repairs.</p></div>
+    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login; <code>/api-usage</code> shows who calls the API and what for.</p></div>
     <div class="item"><h3>api/ <span class="pill">always on</span></h3><p>The data API for Python: markets, candles, and backfill on demand — see the API tab.</p></div>
   </div>
 </section>
@@ -415,7 +415,7 @@
   <ul class="check">
     <li class="done">Switch the server to the new programs<span>discover, activity, live and viewer running in tmux since 31 Oct.</span></li>
     <li class="todo">Install them as services<span>So they start on boot and restart themselves (needs your sudo password).</span></li>
-    <li class="todo">Run the first full backfill<span>Tens of thousands of requests; runs in the background on leftover budget.</span></li>
+    <li class="todo">First full backfill <span class="pill warm">running since 1 Nov</span><span>~792,000 markets, 3.8 billion market-minutes, on leftover budget; never-traded markets cost nothing.</span></li>
     <li class="todo">Harden access<span>Turn off SSH passwords; turn off Tailscale key expiry for the server.</span></li>
     <li class="todo">Reliable internet<span>Office Wi-Fi blocks lookups and drops out; a 4G/5G router or registered network would fix it.</span></li>
     <li class="done">Fill-on-read for quiet minutes<span>The API carries the last price forward, only where every trade is known.</span></li>
@@ -688,7 +688,8 @@ GET /v1/backfill/17
       <div class="item"><h3>600 requests a minute <span class="pill">per key</span></h3><p><code>X-RateLimit-Remaining</code> on every answer; pmapi waits out a 429 itself.</p></div>
       <div class="item"><h3>10 backfills a minute <span class="pill">per key</span></h3><p>Each one costs Kalshi requests, so they are capped on their own.</p></div>
       <div class="item"><h3>Keys stored hashed</h3><p>A stolen table opens nothing; a revoked key stops within a minute.</p></div>
-      <div class="item"><h3>No way through to Kalshi</h3><p>Only backfill jobs reach it, inside the shared budget.</p></div>
+      <div class="item"><h3>No way through to Kalshi</h3><p>Only backfill jobs reach it, on their own line of the shared budget.</p></div>
+      <div class="item"><h3>Usage page <span class="pill ok">viewer</span></h3><p>Every request is recorded for 30 days; <code>/api-usage</code> shows callers, markets, errors and jobs.</p></div>
     </div>
   </div>
 </section>
@@ -704,6 +705,7 @@ GET /v1/backfill/17
     <li class="done">Forward fill<span>1m, 5m, 1h and 1d, whole-life and mid-life windows, matched to a fill of the truth.</span></li>
     <li class="done">Paging and formats<span>Small pages joined = one page; json = csv = parquet; 5 tickers together = each alone.</span></li>
     <li class="done">A crash mid-job<span>A second push refused while one runs; the API killed mid-job; the job finished after the restart.</span></li>
+    <li class="done">Request records<span>Every request logged with key, status, rows and bytes; none lost while the table was away; usage page renders.</span></li>
   </ul>
 </section>
 
