@@ -224,6 +224,49 @@ CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
 
 
 -- ---------------------------------------------------------------------------
+-- The HTTP API (api/). Keys are stored only as a SHA-256 of the key itself:
+-- they are long random strings, so a plain hash is enough to make a stolen
+-- table useless. `scope` is 'read' (data only) or 'full' (may also ask for
+-- backfills); rate_per_min overrides the default request limit.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_id       BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    key_hash     TEXT NOT NULL UNIQUE,
+    key_prefix   TEXT NOT NULL,         -- the first characters, to tell keys apart
+    scope        TEXT NOT NULL DEFAULT 'full' CHECK (scope IN ('read', 'full')),
+    rate_per_min INTEGER,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    revoked_at   TIMESTAMPTZ
+);
+
+-- Backfills asked for through the API, run by a worker inside it. A job is
+-- queued, then running, then done or failed; one left running by a restart
+-- is queued again.
+CREATE TABLE IF NOT EXISTS api_jobs (
+    job_id         BIGSERIAL PRIMARY KEY,
+    key_id         BIGINT REFERENCES api_keys (key_id) ON DELETE SET NULL,
+    ticker         TEXT NOT NULL,
+    from_ts        TIMESTAMPTZ NOT NULL,
+    to_ts          TIMESTAMPTZ NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'queued',
+    requested_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at     TIMESTAMPTZ,
+    finished_at    TIMESTAMPTZ,
+    requests_total INTEGER,
+    requests_done  INTEGER NOT NULL DEFAULT 0,
+    candles        INTEGER NOT NULL DEFAULT 0,
+    error          TEXT
+);
+
+-- At most one unfinished job per market.
+CREATE UNIQUE INDEX IF NOT EXISTS api_jobs_open_idx ON api_jobs (ticker)
+    WHERE status IN ('queued', 'running');
+
+
+-- ---------------------------------------------------------------------------
 -- Upgrades for databases made by an earlier version of this file.
 -- ---------------------------------------------------------------------------
 

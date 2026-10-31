@@ -1,38 +1,33 @@
-"""Is everything the API depends on reachable?"""
+"""Is everything the API depends on reachable? The one endpoint without a key."""
 
-import asyncio
+from fastapi import APIRouter
 
-from fastapi import APIRouter, Request, Response
+import db
+import ratelimit
+from api.common import json_response
 
-router = APIRouter(tags=["health"])
+router = APIRouter(tags=["meta"])
 
 
-@router.get("/health")
-async def health(request: Request, response: Response):
-    """PostgreSQL, TimescaleDB and Redis. 200 when all are up, 503 otherwise."""
+@router.get("/health", summary="PostgreSQL, TimescaleDB and Redis: 200 if all are up, else 503")
+def health():
     checks = {}
-
     try:
-        async with asyncio.timeout(3):
-            async with request.app.state.pg.connection() as conn:
-                row = await (await conn.execute(
-                    "SELECT current_database() AS database,"
-                    " (SELECT extversion FROM pg_extension WHERE extname = 'timescaledb')"
-                    " AS timescaledb")).fetchone()
-        checks["postgres"] = {"ok": True, "database": row["database"]}
-        checks["timescaledb"] = {"ok": row["timescaledb"] is not None,
-                                 "version": row["timescaledb"]}
+        with db.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 3000")
+            cur.execute("SELECT (SELECT extversion FROM pg_extension"
+                        " WHERE extname = 'timescaledb') AS timescaledb")
+            version = cur.fetchone()["timescaledb"]
+        checks["postgres"] = {"ok": True}
+        checks["timescaledb"] = {"ok": version is not None, "version": version}
     except Exception as exc:
         checks["postgres"] = {"ok": False, "error": type(exc).__name__}
         checks["timescaledb"] = {"ok": False}
-
     try:
-        async with asyncio.timeout(2):
-            await request.app.state.redis.ping()
+        ratelimit.client().ping()
         checks["redis"] = {"ok": True}
     except Exception as exc:
         checks["redis"] = {"ok": False, "error": type(exc).__name__}
-
     ok = all(c["ok"] for c in checks.values())
-    response.status_code = 200 if ok else 503
-    return {"status": "ok" if ok else "degraded", "checks": checks}
+    return json_response({"status": "ok" if ok else "degraded", "checks": checks},
+                         200 if ok else 503)

@@ -1,24 +1,35 @@
 """API settings, read from the environment / the project's .env.
 
-The database settings are the same PG* variables the collector uses, so the
-API and the collector always point at the same database.
+The database and Redis settings are the ones every other program uses, so the
+API always reads what the collectors write.
 """
 
 import os
 
-from db import load_env
+import settings
 
-load_env()
+
+def _num(name, default):
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw else default
+
 
 API_HOST = os.environ.get("API_HOST", "127.0.0.1")
-API_PORT = int(os.environ.get("API_PORT", "8000"))
+API_PORT = _num("API_PORT", 8000)
 
-PG_DSN = (f"host={os.environ.get('PGHOST', 'localhost')}"
-          f" port={os.environ.get('PGPORT', '5432')}"
-          f" dbname={os.environ.get('PGDATABASE', 'prediction_markets')}"
-          f" user={os.environ.get('PGUSER', 'postgres')}"
-          f" password={os.environ.get('PGPASSWORD', '')}")
-PG_POOL_MIN = int(os.environ.get("API_PG_POOL_MIN", "1"))
-PG_POOL_MAX = int(os.environ.get("API_PG_POOL_MAX", "10"))
+# Requests per key per minute, unless the key has its own limit; and how many
+# backfills a key may ask for per minute.
+RATE_PER_MIN = _num("API_RATE_PER_MIN", 600)
+BACKFILL_PER_MIN = _num("API_BACKFILL_PER_MIN", 10)
+# Requests with a missing or wrong key, from everyone together, per minute.
+BAD_KEYS_PER_MIN = _num("API_BAD_KEYS_PER_MIN", 300)
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+MAX_ROWS = 10_000               # rows per page, any endpoint
+DEFAULT_ROWS = 100              # ...when `limit` is not given (candles: MAX_ROWS)
+STATEMENT_TIMEOUT = _num("API_STATEMENT_TIMEOUT_SECONDS", 30)
+DB_POOL = _num("API_DB_POOL", 12)
+JOB_WORKERS = _num("API_JOB_WORKERS", 2)
+
+# Live collection runs this far behind the clock (a minute to settle, a cycle
+# to fetch it), so "complete" coverage is judged up to here.
+LIVE_LAG = settings.SETTLE_SECONDS + 120

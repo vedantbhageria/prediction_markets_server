@@ -64,12 +64,22 @@ class Link:
         self.lock = threading.Lock()
         self.since = None
 
+    def _publish(self):
+        """Tell the API's /v1/status that this host is out, for as long as
+        the checks keep failing. Best effort: Redis may be out too."""
+        try:
+            ratelimit.client().set(f"{settings.REDIS_PREFIX}down:{self.host}", self.since,
+                                   ex=int(settings.NET_PROBE_SECONDS * 3) + 10)
+        except Exception:
+            pass
+
     def down(self, exc):
         with self.lock:
             if not self.up.is_set():
                 return
             self.up.clear()
             self.since = time.time()
+        self._publish()
         log.warning("%s unreachable (%s); checking again every %ds", self.host,
                     type(exc).__name__, settings.NET_PROBE_SECONDS)
         threading.Thread(target=self._probe, daemon=True, name=f"probe-{self.host}").start()
@@ -82,7 +92,12 @@ class Link:
                 socket.getaddrinfo(self.host, port)
                 socket.create_connection((self.host, port), timeout=10).close()
             except OSError:
+                self._publish()
                 continue
+            try:
+                ratelimit.client().delete(f"{settings.REDIS_PREFIX}down:{self.host}")
+            except Exception:
+                pass
             log.warning("%s reachable again after %.0fs", self.host, time.time() - self.since)
             self.up.set()
             return

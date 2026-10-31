@@ -22,6 +22,7 @@ shared budget in ratelimit.py: hot at full priority, warm at a lower one.
 """
 
 import argparse
+import json
 import logging
 import signal
 import threading
@@ -132,6 +133,16 @@ class Live:
                  time.strftime("%H:%M", time.gmtime(end)), f"{len(hot):,}", h[0] + h[1], h[1],
                  f"{h[2]:,}", f"{warm_markets:,}", w[0] + w[1], w[1], f"{w[2]:,}",
                  time.time() - started)
+        try:
+            # For the API's /v1/status: how far behind live collection is.
+            ratelimit.client().set(ratelimit.KEY + "live", json.dumps({
+                "at": time.time(), "minute": end, "seconds": round(time.time() - started, 1),
+                "hot": {"markets": len(hot), "requests": h[0] + h[1], "failed": h[1],
+                        "candles": h[2]},
+                "warm": {"markets": warm_markets, "requests": w[0] + w[1], "failed": w[1],
+                         "candles": w[2]}}), ex=3600)
+        except Exception:
+            pass
         return deadline
 
     def run(self, cycles=None):

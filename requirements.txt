@@ -3,9 +3,11 @@ psycopg2-binary
 pyarrow
 requests
 
+redis
+
 # API
 fastapi
 uvicorn[standard]
-psycopg[binary]
-psycopg-pool
-redis
+
+# Only for pmapi.py, the Python client, and the API's tests
+# pandas

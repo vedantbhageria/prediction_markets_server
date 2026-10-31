@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from psycopg2.pool import ThreadedConnectionPool
 ENV_FILE = Path(__file__).with_name(".env")
 
 _pool: ThreadedConnectionPool | None = None
+_slots: threading.BoundedSemaphore | None = None
 
 
 def load_env(path: Path = ENV_FILE) -> None:
@@ -50,9 +52,10 @@ def dsn_params() -> dict[str, str | int]:
 
 
 def get_pool(minconn: int = 1, maxconn: int = 10) -> ThreadedConnectionPool:
-    global _pool
+    global _pool, _slots
     if _pool is None:
         _pool = ThreadedConnectionPool(minconn, maxconn, **dsn_params())
+        _slots = threading.BoundedSemaphore(maxconn)
     return _pool
 
 
@@ -61,9 +64,17 @@ def connection():
     """Borrow a pooled connection; commits on success, rolls back on error.
 
     A connection broken by a database restart is discarded rather than handed
-    back to the pool, so a long-running service recovers by itself.
+    back to the pool, so a long-running service recovers by itself. When every
+    connection is in use this waits for one instead of failing.
     """
     pool = get_pool()
+    with _slots:
+        with _borrowed(pool) as conn:
+            yield conn
+
+
+@contextmanager
+def _borrowed(pool):
     conn = pool.getconn()
     broken = False
     try:
@@ -109,10 +120,10 @@ def ping() -> bool:
 
 
 def close_pool() -> None:
-    global _pool
+    global _pool, _slots
     if _pool is not None:
         _pool.closeall()
-        _pool = None
+        _pool = _slots = None
 
 
 if __name__ == "__main__":
