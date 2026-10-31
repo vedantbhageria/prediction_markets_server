@@ -87,11 +87,27 @@
   .check li span { color: var(--muted); display: block; font-size: 14px; }
   .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 14px; }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 4px; margin-right: 6px; vertical-align: -1px; }
+  .tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; padding: 10px 0; margin: -10px 0 0;
+          background: var(--bg); border-bottom: 1px solid var(--line); }
+  .tabs a { text-decoration: none; color: var(--muted); font-weight: 700; font-size: 15px; padding: 8px 16px; border-radius: 10px; }
+  .tabs a[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+  .js .tab[hidden] { display: none; }
+  pre { margin: 0; background: var(--soft); border-radius: 14px; padding: 16px 18px; overflow-x: auto;
+        font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre .c { color: var(--muted); }
+  p code, td code, li code { overflow-wrap: anywhere; }
+  .method { font: 700 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 2px 8px; border-radius: 6px;
+            background: var(--cold-soft); color: var(--cold); margin-right: 8px; }
+  .method.post { background: var(--hot-soft); color: var(--hot); }
+  .two { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
+  .two > * { min-width: 0; }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; margin: 0 0 8px; }
   footer { margin-top: 80px; color: var(--muted); font-size: 14px; text-align: center; }
   @media (max-width: 560px) {
     .wrap { padding: 36px 16px 72px; }
     .sub { margin-left: 0; }
     td:first-child { white-space: normal; }
+    .two { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -109,6 +125,13 @@
     <div class="stat"><b>240 / min</b><span>Kalshi requests, shared by every program</span></div>
   </div>
 </header>
+
+<nav class="tabs" role="tablist">
+  <a href="#architecture" role="tab" aria-selected="true" data-tab="architecture">Architecture</a>
+  <a href="#api" role="tab" aria-selected="false" data-tab="api">API</a>
+</nav>
+
+<div class="tab" id="architecture" role="tabpanel">
 
 <!-- 1 ------------------------------------------------------------------->
 <section>
@@ -169,7 +192,7 @@
       <text x="810" y="164" text-anchor="middle" font-size="12" fill="var(--muted)">browser, login</text>
       <rect x="740" y="200" width="140" height="56" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
       <text x="810" y="224" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">API</text>
-      <text x="810" y="244" text-anchor="middle" font-size="12" fill="var(--muted)">FastAPI · /health</text>
+      <text x="810" y="244" text-anchor="middle" font-size="12" fill="var(--muted)">for Python · keys</text>
       <path d="M690 180 L 738 150" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
       <path d="M690 215 L 738 226" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
       <!-- you -->
@@ -191,7 +214,7 @@
     <div class="item"><h3>Tailscale</h3><p>Private network between server, laptop and iPad — server is <code>100.106.150.105</code>.</p></div>
     <div class="item"><h3>SSH with keys</h3><p>Laptop and iPad (Termius) log in with keys, no password needed.</p></div>
     <div class="item"><h3>Encrypted DNS</h3><p>Cloudflare DNS over TLS, because the office network refuses normal lookups.</p></div>
-    <div class="item"><h3>Public viewer link <span class="pill warm">waiting</span></h3><p>Tailscale Funnel is on; its certificate needs the server to reach Let's Encrypt.</p></div>
+    <div class="item"><h3>Public links <span class="pill ok">Funnel</span></h3><p>Viewer on <code>https://…ts.net</code>, API on port <code>8443</code>; each needs its login or key.</p></div>
     <div class="item"><h3>Git deploy</h3><p>Push from the laptop to the server's bare repo and the code updates itself.</p></div>
   </div>
 </section>
@@ -206,7 +229,7 @@
     <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
     <div class="item"><h3>backfill.py <span class="pill">by hand</span></h3><p>Fills old history, reports coverage, checks candles against volumes, repairs.</p></div>
     <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer, same look as before, behind a username and password.</p></div>
-    <div class="item"><h3>api/ <span class="pill">backbone</span></h3><p>FastAPI on uvicorn; only <code>/health</code> for now, endpoints come later.</p></div>
+    <div class="item"><h3>api/ <span class="pill">always on</span></h3><p>The data API for Python: markets, candles, and backfill on demand — see the API tab.</p></div>
   </div>
 </section>
 
@@ -395,9 +418,10 @@
     <li class="todo">Run the first full backfill<span>Tens of thousands of requests; runs in the background on leftover budget.</span></li>
     <li class="todo">Harden access<span>Turn off SSH passwords; turn off Tailscale key expiry for the server.</span></li>
     <li class="todo">Reliable internet<span>Office Wi-Fi blocks lookups and drops out; a 4G/5G router or registered network would fix it.</span></li>
-    <li class="todo">Fill-on-read for quiet minutes<span>Carry the last price forward when candles are read, not stored.</span></li>
+    <li class="done">Fill-on-read for quiet minutes<span>The API carries the last price forward, only where every trade is known.</span></li>
+    <li class="done">The API<span>Markets, candles in three formats, the backfill push, keys and limits.</span></li>
     <li class="todo">Derived data and the viewer's panels<span>Strike, dates, related wording, nearby markets.</span></li>
-    <li class="todo">API endpoints, backups, Polymarket<span>Polymarket is blocked on this network; its tables wait.</span></li>
+    <li class="todo">Backups, Polymarket<span>Polymarket is blocked on this network; its tables wait.</span></li>
   </ul>
 </section>
 
@@ -417,11 +441,295 @@
       <tr><td>Separate programs</td><td>Each can be stopped, restarted or rerun as a data fixer on its own.</td></tr>
       <tr><td>REST, not WebSocket</td><td>The WebSocket needs an API key; REST with a budget covers it for now.</td></tr>
       <tr><td>No Redis buffer</td><td>PostgreSQL is on the same machine; outages are to Kalshi, so there is nothing to buffer.</td></tr>
+      <tr><td>API shaped like Alpaca</td><td>Clean request shape, Binance's interval names, Zerodha's files: everything loads into pandas.</td></tr>
+      <tr><td>Fill when read</td><td>Forward fill is worked out per request, so storage stays traded minutes only.</td></tr>
+      <tr><td>Intervals from 1-minute rows</td><td>Always matches what is stored, even right after a backfill; the rollups can lag 30 min.</td></tr>
     </table>
   </div>
 </section>
 
-<footer>prediction_markets_server · docs/architecture.html · updated 31 Oct 2026</footer>
+</div><!-- architecture -->
+
+<div class="tab" id="api" role="tabpanel">
+
+<!-- A1 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">1</span>Start here</h2>
+  <p class="sub">One address, one key, and everything comes back ready for pandas.</p>
+  <div class="two">
+    <div class="card">
+      <p class="label">Address</p>
+      <p style="margin:0 0 14px"><code>https://theonealpha.tail947e08.ts.net:8443</code></p>
+      <p class="label">Key</p>
+      <p style="margin:0 0 14px">Every request sends <code>X-API-Key: pm_…</code> — only <code>/health</code> works without one.</p>
+      <p class="label">Make a key (on the server)</p>
+      <pre>python -m api.keys create laptop
+python -m api.keys create notebook --read-only
+python -m api.keys list · revoke NAME</pre>
+    </div>
+    <div class="card">
+      <p class="label">Python, with pmapi.py</p>
+      <pre><span class="c"># copy pmapi.py next to your notebook</span>
+from pmapi import Client
+pm = Client(url, key)   <span class="c"># or PM_API_URL / PM_API_KEY</span>
+
+pm.markets(q="bitcoin", status="open")
+pm.candles("KXBTCD-…", "5m", start="2026-10-25")
+pm.closes(["A", "B"], "1h")   <span class="c"># one column each</span>
+pm.wait(pm.backfill("KXBTCD-…"))</pre>
+    </div>
+  </div>
+</section>
+
+<!-- A2 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">2</span>How a request travels</h2>
+  <p class="sub">Reads come straight from the database; a backfill goes to Kalshi through the shared budget.</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 270" role="img" aria-label="Your Python reaches the API through Tailscale Funnel; the API checks the key and limit, reads PostgreSQL, and queues backfills that a worker fetches from Kalshi">
+      <defs>
+        <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+      <rect x="20" y="90" width="140" height="80" rx="16" fill="var(--you-soft)" stroke="var(--you)" stroke-width="2"/>
+      <text x="90" y="124" text-anchor="middle" font-size="16" font-weight="700" fill="var(--you)">your Python</text>
+      <text x="90" y="146" text-anchor="middle" font-size="12" fill="var(--muted)">pmapi · pandas</text>
+      <path d="M160 130 H208" stroke="var(--you)" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arr4)"/>
+      <text x="184" y="118" text-anchor="middle" font-size="11" fill="var(--you)">https</text>
+      <rect x="210" y="90" width="130" height="80" rx="16" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="275" y="124" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">Funnel</text>
+      <text x="275" y="146" text-anchor="middle" font-size="12" fill="var(--muted)">port 8443</text>
+      <path d="M340 130 H388" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr4)"/>
+      <rect x="390" y="60" width="200" height="140" rx="16" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
+      <text x="490" y="92" text-anchor="middle" font-size="16" font-weight="700" fill="var(--accent)">API</text>
+      <text x="410" y="122" font-size="13" fill="var(--ink)">1 · key valid?</text>
+      <text x="410" y="146" font-size="13" fill="var(--ink)">2 · under 600 / min?</text>
+      <text x="410" y="170" font-size="13" fill="var(--ink)">3 · answer or queue</text>
+      <path d="M590 100 C 630 100, 640 60, 678 60" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr4)"/>
+      <text x="628" y="70" font-size="12" fill="var(--muted)">read</text>
+      <ellipse cx="760" cy="40" rx="80" ry="14" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+      <path d="M680 40 v40 a80 14 0 0 0 160 0 v-40" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+      <ellipse cx="760" cy="40" rx="80" ry="14" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+      <text x="760" y="76" text-anchor="middle" font-size="14" font-weight="700" fill="var(--db)">PostgreSQL</text>
+      <path d="M590 165 C 630 165, 640 200, 678 200" fill="none" stroke="var(--hot)" stroke-width="2" marker-end="url(#arr4)"/>
+      <text x="612" y="214" font-size="12" fill="var(--hot)">POST backfill</text>
+      <rect x="680" y="170" width="200" height="60" rx="14" fill="var(--hot-soft)"/>
+      <text x="780" y="196" text-anchor="middle" font-size="14" font-weight="700" fill="var(--hot)">job queue + worker</text>
+      <text x="780" y="216" text-anchor="middle" font-size="12" fill="var(--muted)">warm priority · Kalshi</text>
+      <path d="M780 168 V96" stroke="var(--hot)" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arr4)"/>
+      <text x="790" y="136" font-size="12" fill="var(--hot)">candles</text>
+    </svg>
+  </div>
+</section>
+
+<!-- A3 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">3</span>Every endpoint</h2>
+  <p class="sub">All under <code>/v1</code>. Lists take <code>limit</code>, <code>page_token</code> and <code>format</code>.</p>
+  <div class="tablecard">
+    <table>
+      <tr><th>Endpoint</th><th>What it gives</th></tr>
+      <tr><td><span class="method">GET</span><code>/markets</code></td><td>Search markets: <code>status q series event category tickers closes_after closes_before min_volume sort</code>.</td></tr>
+      <tr><td><span class="method">GET</span><code>/markets/{ticker}</code></td><td>One market in full: rules, event, series, activity score, hot or not, candles held.</td></tr>
+      <tr><td><span class="method">GET</span><code>/markets/{ticker}/candles</code></td><td>Candles for one market, any interval, forward-filled or raw.</td></tr>
+      <tr><td><span class="method">GET</span><code>/candles?tickers=A,B</code></td><td>Up to 100 markets in one long table with a <code>ticker</code> column.</td></tr>
+      <tr><td><span class="method">GET</span><code>/markets/{ticker}/latest</code></td><td>The last trade's candle, plus the market's volume and open interest.</td></tr>
+      <tr><td><span class="method">GET</span><code>/latest?tickers=A,B</code></td><td>The last trade of up to 1,000 markets, in the order asked.</td></tr>
+      <tr><td><span class="method">GET</span><code>/events</code> · <code>/events/{event}</code></td><td>Events with market counts; one event with all its markets.</td></tr>
+      <tr><td><span class="method">GET</span><code>/series</code> · <code>/series/{series}</code></td><td>Series; one series with counts and its latest 100 events.</td></tr>
+      <tr><td><span class="method">GET</span><code>/categories</code></td><td>Every category with series, event, market and open-market counts.</td></tr>
+      <tr><td><span class="method">GET</span><code>/hot</code></td><td>The markets fetched every minute, busiest first.</td></tr>
+      <tr><td><span class="method">GET</span><code>/status</code></td><td>Is Kalshi reachable, how far behind live is, budget in use, last scans, jobs.</td></tr>
+      <tr><td><span class="method post">POST</span><code>/backfill</code></td><td>The push command: download one market's candles again, now.</td></tr>
+      <tr><td><span class="method">GET</span><code>/backfill/{job_id}</code></td><td>How that job is going: queued, running, done or failed, with progress.</td></tr>
+      <tr><td><span class="method">GET</span><code>/health</code></td><td>Database, TimescaleDB and Redis up? No key needed.</td></tr>
+    </table>
+  </div>
+  <p style="color:var(--muted);font-size:14px;margin:12px 4px 0">Interactive docs, with every parameter, at <code>/docs</code>.</p>
+</section>
+
+<!-- A4 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">4</span>Candles</h2>
+  <p class="sub">Forward fill by default — but only where we know nothing traded.</p>
+  <div class="fig">
+    <svg viewBox="0 0 900 250" role="img" aria-label="A row of minutes: before the first trade no rows, traded minutes are real candles, quiet minutes inside coverage repeat the last close, minutes not downloaded are left out">
+      <text x="20" y="28" font-size="13" font-weight="700" fill="var(--muted)" letter-spacing="1">ONE MARKET, MINUTE BY MINUTE</text>
+      <rect x="20" y="44" width="760" height="22" rx="6" fill="var(--ok-soft)"/>
+      <text x="400" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="var(--ok)">coverage: every trade here is stored</text>
+      <rect x="780" y="44" width="100" height="22" rx="6" fill="var(--soft)"/>
+      <text x="830" y="60" text-anchor="middle" font-size="12" fill="var(--muted)">not yet</text>
+      <g>
+        <rect x="24" y="84" width="64" height="70" rx="10" fill="none" stroke="var(--line)" stroke-dasharray="4 4"/>
+        <rect x="96" y="84" width="64" height="70" rx="10" fill="none" stroke="var(--line)" stroke-dasharray="4 4"/>
+        <rect x="168" y="84" width="64" height="70" rx="10" fill="var(--accent)"/>
+        <rect x="240" y="84" width="64" height="70" rx="10" fill="var(--accent)"/>
+        <rect x="312" y="84" width="64" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <rect x="384" y="84" width="64" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <rect x="456" y="84" width="64" height="70" rx="10" fill="var(--accent)"/>
+        <rect x="528" y="84" width="64" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <rect x="600" y="84" width="64" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <rect x="672" y="84" width="64" height="70" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="4 3"/>
+        <rect x="784" y="84" width="64" height="70" rx="10" fill="none" stroke="var(--line)" stroke-dasharray="4 4"/>
+      </g>
+      <g font-size="13" font-weight="700" text-anchor="middle" fill="var(--card)">
+        <text x="200" y="124">0.42</text><text x="272" y="124">0.45</text><text x="488" y="124">0.51</text>
+      </g>
+      <g font-size="13" text-anchor="middle" fill="var(--accent)">
+        <text x="344" y="124">0.45</text><text x="416" y="124">0.45</text>
+        <text x="560" y="124">0.51</text><text x="632" y="124">0.51</text><text x="704" y="124">0.51</text>
+      </g>
+      <g font-size="12" fill="var(--muted)">
+        <text x="92" y="182" text-anchor="middle">no row: no price yet</text>
+        <text x="236" y="182" text-anchor="middle">traded</text>
+        <text x="380" y="182" text-anchor="middle">filled = true</text>
+        <text x="488" y="182" text-anchor="middle">traded</text>
+        <text x="632" y="182" text-anchor="middle">close carried, volume 0</text>
+        <text x="816" y="182" text-anchor="middle">left out</text>
+      </g>
+      <text x="20" y="222" font-size="13" fill="var(--ink)">fill=forward (default): every bucket inside coverage after the first trade, until the close.</text>
+      <text x="20" y="242" font-size="13" fill="var(--ink)">fill=raw: the solid boxes only.</text>
+    </svg>
+  </div>
+  <div class="tablecard" style="margin-top:14px">
+    <table>
+      <tr><th>Parameter</th><th>Meaning</th></tr>
+      <tr><td><code>interval</code></td><td><code>1m 5m 15m 1h 4h 1d</code> — Binance's names; buckets start on round UTC times.</td></tr>
+      <tr><td><code>start</code> · <code>end</code></td><td><code>2026-10-31</code>, <code>2026-10-31T14:00:00Z</code> or Unix seconds; end not included. Default: the last day of the market's life.</td></tr>
+      <tr><td><code>fill</code></td><td><code>forward</code> (default) or <code>raw</code>.</td></tr>
+      <tr><td><code>limit</code></td><td>Up to 10,000 rows a page; follow <code>next_page_token</code> for the rest (pmapi does it for you).</td></tr>
+      <tr><td>columns</td><td><code>ts open high low close volume open_interest filled</code> — <code>ts</code> is the bucket's start, in UTC.</td></tr>
+      <tr><td><code>coverage</code></td><td><code>{"from", "to", "complete"}</code>: what is held, and whether it covers your window.</td></tr>
+    </table>
+  </div>
+  <div class="grid" style="margin-top:14px">
+    <div class="item"><h3>Carried in</h3><p>A window that starts mid-life opens with the last close before it.</p></div>
+    <div class="item"><h3>Never invented</h3><p>Minutes not downloaded yet get no row; <code>complete</code> turns false instead.</p></div>
+    <div class="item"><h3>Always current</h3><p>Every interval is built from the stored minutes at the moment you ask.</p></div>
+  </div>
+</section>
+
+<!-- A5 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">5</span>The push command</h2>
+  <p class="sub">Ask the server to fetch one market again — it answers at once and works in the background.</p>
+  <div class="two">
+    <div>
+      <pre><span class="c"># ask</span>
+POST /v1/backfill
+{"ticker": "KXBTCD-…",
+ "from": "2026-10-31", "to": "2026-11-01"}   <span class="c">← optional</span>
+
+<span class="c"># answer: 202 Accepted</span>
+{"job_id": 17, "status": "queued", …}
+
+<span class="c"># follow</span>
+GET /v1/backfill/17
+{"status": "done", "candles": 1212,
+ "progress": {"requests_done": 5, "requests_total": 5}}</pre>
+    </div>
+    <ul class="check">
+      <li class="done">Default stretch<span>The market's whole life in the store window: from its open, or 30 days back.</span></li>
+      <li class="done">Overwrites<span>Stored candles in that stretch are replaced with Kalshi's answer.</span></li>
+      <li class="done">Shared budget<span>Runs at warm priority: after hot markets, before backfill.py.</span></li>
+      <li class="done">Survives restarts<span>Jobs are saved; one cut short is run again when the API returns.</span></li>
+      <li class="done">One at a time<span>A second push for the same market while one runs gets <code>409</code>.</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- A6 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">6</span>Formats and pandas</h2>
+  <p class="sub">Add <code>format=</code> to any list. pmapi uses parquet on its own when pyarrow is installed.</p>
+  <div class="grid">
+    <div class="item"><h3>json <span class="pill">default</span></h3><p>Rows plus <code>coverage</code> and <code>next_page_token</code>: <code>pd.DataFrame(r.json()["candles"])</code>.</p></div>
+    <div class="item"><h3>csv</h3><p>Straight into <code>pd.read_csv(url, storage_options={"X-API-Key": key})</code>.</p></div>
+    <div class="item"><h3>parquet <span class="pill ok">fastest</span></h3><p>~10× smaller, real time and number types: <code>pd.read_parquet(io.BytesIO(r.content))</code>.</p></div>
+  </div>
+  <div class="formula" style="margin-top:14px">
+    <span class="c">csv and parquet</span>  the next page's token is in the <code>X-Next-Page-Token</code> header<br>
+    <span class="c">one market    </span>  coverage is in <code>X-Coverage-From</code> · <code>-To</code> · <code>-Complete</code>
+  </div>
+  <div class="tablecard" style="margin-top:14px">
+    <table>
+      <tr><th>pmapi</th><th>Returns</th></tr>
+      <tr><td><code>pm.markets(**filters)</code></td><td>DataFrame of markets, every page joined.</td></tr>
+      <tr><td><code>pm.candles(t, "5m", start, end)</code></td><td>DataFrame indexed by <code>ts</code>; <code>df.attrs["coverage"]</code>.</td></tr>
+      <tr><td><code>pm.candles([a, b], "1h")</code></td><td>One long DataFrame with a <code>ticker</code> column.</td></tr>
+      <tr><td><code>pm.closes([a, b], "1h")</code></td><td>Wide: one close column per market, ready to correlate.</td></tr>
+      <tr><td><code>pm.latest(t or [..])</code></td><td>Dict for one market; DataFrame for a list.</td></tr>
+      <tr><td><code>pm.market · event · series · categories</code></td><td>Dicts and DataFrames for the rest of the catalogue.</td></tr>
+      <tr><td><code>pm.hot() · pm.status()</code></td><td>The hot list; how collection is doing.</td></tr>
+      <tr><td><code>pm.backfill(t) · pm.wait(job)</code></td><td>Push a backfill; block until it is done.</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- A7 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">7</span>Limits and errors</h2>
+  <p class="sub">Every error has the same shape: <code>{"error": {"code": "…", "message": "…"}}</code>.</p>
+  <div class="two">
+    <div class="tablecard">
+      <table>
+        <tr><th>Status</th><th>Code · when</th></tr>
+        <tr><td>400</td><td><code>invalid_parameter</code> · a bad interval, time, sort or limit</td></tr>
+        <tr><td>401</td><td><code>missing_key</code> / <code>invalid_key</code> · no key, wrong or revoked</td></tr>
+        <tr><td>403</td><td><code>read_only_key</code> · a read key asked for a backfill</td></tr>
+        <tr><td>404</td><td><code>not_found</code> · not in the store (30-day window)</td></tr>
+        <tr><td>409</td><td><code>already_queued</code> · that market's backfill is running</td></tr>
+        <tr><td>429</td><td><code>rate_limited</code> · wait <code>Retry-After</code> seconds</td></tr>
+        <tr><td>503</td><td><code>query_timeout</code> / <code>database_unavailable</code></td></tr>
+      </table>
+    </div>
+    <div class="grid" style="grid-template-columns:1fr">
+      <div class="item"><h3>600 requests a minute <span class="pill">per key</span></h3><p><code>X-RateLimit-Remaining</code> on every answer; pmapi waits out a 429 itself.</p></div>
+      <div class="item"><h3>10 backfills a minute <span class="pill">per key</span></h3><p>Each one costs Kalshi requests, so they are capped on their own.</p></div>
+      <div class="item"><h3>Keys stored hashed</h3><p>A stolen table opens nothing; a revoked key stops within a minute.</p></div>
+      <div class="item"><h3>No way through to Kalshi</h3><p>Only backfill jobs reach it, inside the shared budget.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- A8 ------------------------------------------------------------------>
+<section>
+  <h2><span class="n">8</span>Tested</h2>
+  <p class="sub">tests/api_test.py, against the simulated Kalshi whose every trade is known.</p>
+  <ul class="check" id="api-tests">
+    <li class="done">Keys and limits<span>No key, wrong key, revoked, read-only, Bearer, and the sixth request of a five-a-minute key.</span></li>
+    <li class="done">Every refusal<span>Thirteen bad requests, each with its documented status and code.</span></li>
+    <li class="done">The push command<span>Busy, quiet, closed and never-traded markets: exactly the true trades stored.</span></li>
+    <li class="done">Forward fill<span>1m, 5m, 1h and 1d, whole-life and mid-life windows, matched to a fill of the truth.</span></li>
+    <li class="done">Paging and formats<span>Small pages joined = one page; json = csv = parquet; 5 tickers together = each alone.</span></li>
+    <li class="done">A crash mid-job<span>A second push refused while one runs; the API killed mid-job; the job finished after the restart.</span></li>
+  </ul>
+</section>
+
+</div><!-- api -->
+
+<footer>prediction_markets_server · docs/architecture.html · updated 1 Nov 2026</footer>
 </div>
+<script>
+  // Tabs: #api opens the API tab. Without scripts both tabs simply show in turn.
+  (function () {
+    document.documentElement.classList.add("js");
+    var tabs = document.querySelectorAll(".tabs a"), panels = document.querySelectorAll(".tab");
+    function show(name) {
+      if (name !== "api") name = "architecture";
+      panels.forEach(function (p) { p.hidden = p.id !== name; });
+      tabs.forEach(function (t) { t.setAttribute("aria-selected", t.dataset.tab === name); });
+    }
+    tabs.forEach(function (t) {
+      t.addEventListener("click", function (e) {
+        e.preventDefault(); show(t.dataset.tab);
+        history.replaceState(null, "", "#" + t.dataset.tab); window.scrollTo(0, 0);
+      });
+    });
+    window.addEventListener("hashchange", function () { show(location.hash.slice(1)); });
+    show(location.hash.slice(1));
+  })();
+</script>
 </body>
 </html>
