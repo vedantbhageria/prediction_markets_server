@@ -380,7 +380,8 @@
     <li class="done">Activity rules, case by case<span>11 cases: new, closed, quiet chains, late coverage, averages, odd readings — all pass.</span></li>
     <li class="done">Shared budget under three processes<span>Busiest 60 s held exactly 120 of 120; after a 429 the rate halved; hot always went first.</span></li>
     <li class="done">Database upgrade<span>Old layout with <code>filled</code> upgraded in place; candles kept; rollups rebuilt.</span></li>
-    <li class="todo" id="e2e">30-minute end-to-end run with faults<span>Running on the server: crashes, network drop, 429s, Redis loss, slow answers — result to follow.</span></li>
+    <li class="done" id="e2e">30-minute end-to-end run with faults<span>Crashes, a network drop, 429s, Redis loss, a half scan and slow answers: 57,303 traded minutes all exactly right — 0 missing, 0 wrong, 0 extra; budget held; busiest markets all hot.</span></li>
+    <li class="done">Real Kalshi<span>13 settled markets: candle volumes add up exactly to Kalshi's own volume; 7,709 quote-only minutes dropped.</span></li>
   </ul>
 </section>
 
@@ -389,7 +390,8 @@
   <h2><span class="n">9</span>Still to do</h2>
   <p class="sub">In rough order.</p>
   <ul class="check">
-    <li class="todo">Switch the server to the new programs<span>Install the discover, activity, live, viewer and API services (needs sudo).</span></li>
+    <li class="done">Switch the server to the new programs<span>discover, activity, live and viewer running in tmux since 31 Oct.</span></li>
+    <li class="todo">Install them as services<span>So they start on boot and restart themselves (needs your sudo password).</span></li>
     <li class="todo">Run the first full backfill<span>Tens of thousands of requests; runs in the background on leftover budget.</span></li>
     <li class="todo">Harden access<span>Turn off SSH passwords; turn off Tailscale key expiry for the server.</span></li>
     <li class="todo">Reliable internet<span>Office Wi-Fi blocks lookups and drops out; a 4G/5G router or registered network would fix it.</span></li>
