@@ -17,6 +17,8 @@ Kalshi was asked for it -- in kalshi_observations, tagged with the discovery
 scan they belong to. activity.py turns those into activity scores.
 """
 
+import queue
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -150,6 +152,50 @@ def _timed(pages):
         yield page, cursor, asked, time.time()
 
 
+def _ahead(items, stop=None):
+    """Iterate `items` with the next one already being fetched.
+
+    The pages come from a background thread one step ahead, so the next
+    request is in flight while this page is written to the database. An error
+    in the fetching thread is raised here, where the pages are used.
+    """
+    q = queue.Queue(maxsize=1)
+    finished = threading.Event()
+    end = object()
+
+    def produce():
+        try:
+            for item in items:
+                while not finished.is_set():
+                    try:
+                        q.put((item, None), timeout=1)
+                        break
+                    except queue.Full:
+                        pass
+                if finished.is_set():
+                    return
+            q.put((end, None))
+        except BaseException as exc:
+            q.put((end, exc))
+
+    threading.Thread(target=produce, daemon=True, name="pages-ahead").start()
+    try:
+        while True:
+            try:
+                item, exc = q.get(timeout=1)
+            except queue.Empty:
+                if _stopped(stop):
+                    return
+                continue
+            if item is end:
+                if exc is not None:
+                    raise exc
+                return
+            yield item
+    finally:
+        finished.set()
+
+
 def sync_series(stop=None):
     """Kalshi's full series list, which also fills in placeholder series."""
     rows = [(s["ticker"], s.get("category"), s.get("title"), s.get("frequency"))
@@ -160,17 +206,44 @@ def sync_series(stop=None):
                                 "series_ticker", ["category", "title", "frequency"])
 
 
-def sync_kalshi(stop=None, categories=None, scan=None):
+def sync_kalshi(stop=None, categories=None, scan=None, progress=None, checkpoint=None):
     """Everything open now, then a re-read of stored markets that left the
-    open list since -- which is how their final status and result land."""
-    seen, total = set(), 0
-    for page, _, asked, answered in _timed(venues.kalshi_events("open")):
-        if _stopped(stop):
-            return total
-        events, markets = _kalshi_rows(page, categories)
-        seen.update(row[0] for row in markets)
-        total += _write_kalshi(events, markets, scan, asked, answered)
+    open list since -- which is how their final status and result land.
 
+    Resumable like the closed import: `progress` records the cursor of the
+    next page and `checkpoint` is called after every page, so a run cut short
+    starts again at the page after the last one written.
+    """
+    progress = progress if progress is not None else {}
+    seen, total = set(), 0
+    if progress.get("cursor") != "done":
+        try:
+            pages = _ahead(_timed(venues.kalshi_events("open", None, progress.get("cursor"))), stop)
+            for page, cursor, asked, answered in pages:
+                if _stopped(stop):
+                    return total
+                events, markets = _kalshi_rows(page, categories)
+                seen.update(row[0] for row in markets)
+                total += _write_kalshi(events, markets, scan, asked, answered)
+                progress["cursor"] = cursor or "done"
+                if checkpoint:
+                    checkpoint()
+        except venues.VenueError as exc:
+            if not progress.get("cursor") or exc.status != 400:
+                raise
+            # Kalshi no longer accepts the saved cursor: read the list again.
+            progress.pop("cursor", None)
+            if checkpoint:
+                checkpoint()
+            return total + sync_kalshi(stop, categories, scan, progress, checkpoint)
+    if _stopped(stop):
+        return total
+
+    # Markets this scan has already read, including pages read before a
+    # restart: they are in its observations.
+    if scan is not None:
+        seen.update(r["ticker"] for r in db.query(
+            "SELECT DISTINCT ticker FROM kalshi_observations WHERE scan_id = %s", (scan,)))
     stale = [r["ticker"] for r in db.query(
         "SELECT ticker FROM kalshi_markets WHERE COALESCE(result, '') = ''"
         " ORDER BY close_time DESC") if r["ticker"] not in seen][:STALE_MAX]
@@ -203,7 +276,8 @@ def import_kalshi_closed(stop=None, since=None, progress=None, checkpoint=None, 
     start = statuses.index(progress["status"]) if progress.get("status") in statuses else 0
     for i, status in enumerate(statuses[start:], start):
         cursor = progress.get("cursor") if progress.get("status") == status else None
-        for page, cursor, asked, answered in _timed(venues.kalshi_events(status, since, cursor)):
+        for page, cursor, asked, answered in _ahead(_timed(venues.kalshi_events(status, since,
+                                                                                 cursor)), stop):
             if _stopped(stop):
                 return total
             total += _write_kalshi(*_kalshi_rows(page), scan, asked, answered)

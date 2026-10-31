@@ -5,14 +5,19 @@ request first takes a token from the shared budget in ratelimit.py.
 """
 
 import json
+import logging
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import requests
 
 import ratelimit
 import settings
+
+log = logging.getLogger("venues")
 
 KALSHI = settings.KALSHI_API_URL
 GAMMA = "https://gamma-api.polymarket.com"
@@ -41,15 +46,92 @@ def session():
     return _local.session
 
 
+class Link:
+    """Whether a venue can be reached at all, shared by every thread.
+
+    The first request that cannot connect (no DNS, refused, reset, no route)
+    marks the link down. From then on every request to that host waits here
+    instead of timing out and retrying on its own, and one background check
+    looks the host up and opens a connection to it every NET_PROBE_SECONDS --
+    no API request, so no budget spent. As soon as that works, everything
+    waiting carries on with the request it was making.
+    """
+
+    def __init__(self, host):
+        self.host = host
+        self.up = threading.Event()
+        self.up.set()
+        self.lock = threading.Lock()
+        self.since = None
+
+    def down(self, exc):
+        with self.lock:
+            if not self.up.is_set():
+                return
+            self.up.clear()
+            self.since = time.time()
+        log.warning("%s unreachable (%s); checking again every %ds", self.host,
+                    type(exc).__name__, settings.NET_PROBE_SECONDS)
+        threading.Thread(target=self._probe, daemon=True, name=f"probe-{self.host}").start()
+
+    def _probe(self):
+        while True:
+            time.sleep(settings.NET_PROBE_SECONDS)
+            try:
+                port = PORTS.get(self.host, 443)
+                socket.getaddrinfo(self.host, port)
+                socket.create_connection((self.host, port), timeout=10).close()
+            except OSError:
+                continue
+            log.warning("%s reachable again after %.0fs", self.host, time.time() - self.since)
+            self.up.set()
+            return
+
+    def wait(self, stop=None):
+        """Block while the link is down. False only if `stop` was set."""
+        while not self.up.wait(1):
+            if stop is not None and stop.is_set():
+                return False
+        return True
+
+
+_links = {}
+_links_lock = threading.Lock()
+PORTS = {}
+
+
+def link(url):
+    parts = urlparse(url)
+    with _links_lock:
+        if parts.hostname not in _links:
+            if parts.port:
+                PORTS[parts.hostname] = parts.port
+            _links[parts.hostname] = Link(parts.hostname)
+        return _links[parts.hostname]
+
+
+# A request that never reached the venue: the network, not the venue, failed.
+UNREACHABLE = (requests.ConnectionError,)
+# Requests that reached the link but kept failing once it was back up give up
+# after this many tries, so one bad request cannot wait forever.
+MAX_UNREACHABLE = 5
+
+
 def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None):
     """One request, retried up to `attempts` times on errors worth retrying.
 
-    Kalshi requests wait for the shared budget first, and a 429 from Kalshi
-    halves that budget for every program before the retry.
+    While the venue cannot be reached at all the request waits for the link
+    to come back and then tries again from where it was; that does not use
+    up `attempts`. Kalshi requests wait for the shared budget first, and a 429
+    from Kalshi halves that budget for every program before the retry.
     """
     status = None
     kalshi = url.startswith(KALSHI)
-    for attempt in range(attempts):
+    net = link(url)
+    attempt = unreachable = 0
+    while True:
+        if not net.wait(stop):
+            raise VenueError(f"{url}: stopped", status)
         if kalshi and not ratelimit.acquire(stop):
             raise VenueError(f"{url}: stopped", status)
         try:
@@ -62,12 +144,19 @@ def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None)
                 ratelimit.throttled()
             elif status != 429 and status < 500:
                 raise VenueError(f"{url}: HTTP {status} {response.text[:120]}", status)
+        except UNREACHABLE as exc:
+            unreachable += 1
+            if unreachable >= MAX_UNREACHABLE:
+                raise
+            net.down(exc)
+            continue
         except requests.RequestException:
             if attempt == attempts - 1:
                 raise
-        if attempt < attempts - 1:
-            time.sleep(min(2 ** attempt, 30))
-    raise VenueError(f"{url}: HTTP {status}, gave up", status)
+        attempt += 1
+        if attempt >= attempts:
+            raise VenueError(f"{url}: HTTP {status}, gave up", status)
+        time.sleep(min(2 ** (attempt - 1), 30))
 
 
 def _chunks(items, size):

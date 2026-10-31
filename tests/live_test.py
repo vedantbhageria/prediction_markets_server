@@ -19,6 +19,9 @@ catch up once, and checks:
   6  no request broke Kalshi's size limits
   7  the busiest markets ended up on the hot list, inside its cap
   8  backfill.py --verify agrees
+  9  an outage in the middle of a scan -- with discover killed and restarted
+     while it lasts -- is picked up within one network check of the network
+     coming back, and the scan carries on from the page it had reached
 """
 
 import json
@@ -97,7 +100,7 @@ def run(name, *args, timeout=1800):
 
 
 def mock(path):
-    with urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}", timeout=60) as r:
+    with urllib.request.urlopen(f"http://127.0.0.1:{PORT + 1}{path}", timeout=60) as r:
         return json.loads(r.read())
 
 
@@ -207,15 +210,15 @@ def check(t0):
 
     # 5, 6  the budget and the size limits
     log = mock("/_stats")["requests"]
-    times = sorted(t for t, _, _ in log)
+    times = sorted(e[0] for e in log)
     worst, j = 0, 0
     for i, t in enumerate(times):
         while times[j] < t - 60:
             j += 1
         worst = max(worst, i - j + 1)
     statuses = {}
-    for _, _, s in log:
-        statuses[s] = statuses.get(s, 0) + 1
+    for e in log:
+        statuses[e[2]] = statuses.get(e[2], 0) + 1
     say(f"{len(log):,} requests; busiest 60 s held {worst} (budget {BUDGET}); by status {statuses}")
     if worst > BUDGET:
         failures.append(f"5: {worst} requests in one 60 s window, budget {BUDGET}")
@@ -237,6 +240,47 @@ def check(t0):
     say("backfill --verify: " + out.strip().splitlines()[-1] if out.strip() else "no output")
     if " 0 do not" not in out:
         failures.append("8: backfill --verify found mismatches:\n" + out)
+    return failures
+
+
+def outage_mid_scan():
+    """Kalshi goes offline (connections refused) right after the first page
+    of the next scan, discover is killed and restarted during the outage,
+    and three minutes later the network comes back."""
+    failures = []
+    mode("offline_after:1")
+    deadline = time.time() + 240
+    while mock("/_stats")["mode"] != "offline":
+        if time.time() > deadline:
+            return ["9: the next scan never started"]
+        time.sleep(1)
+    off = time.time()
+    say("mock Kalshi: offline after the first page of a scan")
+    time.sleep(20)
+    kill("discover")                                        # dies during the outage
+    time.sleep(5)
+    start("discover", "discover.py")
+    time.sleep(max(0.0, off + 180 - time.time()))
+    mode("normal")
+    on = time.time()
+    time.sleep(90)
+
+    log = mock("/_stats")["requests"]
+    back = [e for e in log if e[0] >= on and e[2] == 200]
+    if not back:
+        return ["9: nothing succeeded after the network came back"]
+    delay = back[0][0] - on
+    pages = [e for e in back if e[1].endswith("/events")]
+    resumed_at = pages[0][3] if pages else None
+    say(f"network back: first answer after {delay:.0f}s (check every"
+        f" {settings.NET_PROBE_SECONDS:.0f}s); discover went on from page cursor {resumed_at!r}")
+    if delay > settings.NET_PROBE_SECONDS + 15:
+        failures.append(f"9: first request after the outage took {delay:.0f}s")
+    if not resumed_at or resumed_at == "0":
+        failures.append(f"9: the scan restarted from the first page (cursor {resumed_at!r})")
+    tail = (LOGS / "discover.log").read_text().rsplit("===== start", 1)[-1]
+    if "open sync failed" in tail or "closed import failed" in tail:
+        failures.append("9: discover gave up during the outage:\n" + tail[-800:])
     return failures
 
 
@@ -275,7 +319,8 @@ def main():
     start("backfill", "backfill.py")                        # alongside everything
     at(25); mode("slow")                                    # answers take 20 s
     at(26); mode("normal")
-    at(29)
+    at(26.5)
+    outage = outage_mid_scan()
     for name in ("backfill", "live", "activity", "discover"):
         kill(name, signal.SIGTERM)
 
@@ -286,7 +331,7 @@ def main():
     run("backfill", "backfill.py")
     run("activity", "activity.py", "--once")
 
-    failures = check(t0)
+    failures = outage + check(t0)
     kill("mock", signal.SIGTERM)
     print()
     if failures:

@@ -14,11 +14,14 @@ Made to be awkward in the ways the real one is, or might be:
   - more than 100 markets or 10,000 market-minutes per request is a 400
   - more than 20 requests in a second is a 429
 
-and it can be told to misbehave on purpose, through GET /_control?mode=:
-  normal   as above
-  down     every connection is dropped without an answer (the network is out)
-  429      most requests get "too many requests"
-  slow     every answer takes 20 s (the network is crawling)
+and it can be told to misbehave on purpose, through GET /_control?mode= on
+the control port (the API port + 1):
+  normal            as above
+  down              every connection is dropped without an answer
+  offline           nothing listens at all: connections are refused
+  offline_after:N   serve N more /events pages, then go offline (mid-scan)
+  429               most requests get "too many requests"
+  slow              every answer takes 20 s (the network is crawling)
 
 GET /_stats returns every request it has seen, for checking the budget.
 """
@@ -264,10 +267,20 @@ class Kalshi:
 
 
 def serve(port, state):
+    """The API on `port`; /_control and /_stats on `port` + 1, which stay up
+    while the API is offline."""
     t0 = time.time()
     k = Kalshi(t0)
+    k.server = None
+    k.offline_after = None
     with open(state, "w", encoding="utf-8") as f:
         json.dump({"t0": t0}, f)
+
+    def go_offline():
+        k.mode = "offline"
+        server = k.server
+        if server is not None:
+            threading.Thread(target=server.shutdown, daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -284,17 +297,12 @@ def serve(port, state):
         def do_GET(self):
             url = urlparse(self.path)
             q = parse_qs(url.query)
-            if url.path == "/_control":
-                k.mode = q.get("mode", ["normal"])[0]
-                return self.reply(200, {"mode": k.mode})
-            if url.path == "/_stats":
-                with k.lock:
-                    return self.reply(200, {"requests": k.log, "mode": k.mode})
+            cursor = q.get("cursor", [""])[0]
             now = time.time()
             mode = k.mode
-            if mode == "down":
+            if mode in ("down", "offline"):
                 with k.lock:
-                    k.log.append((now, url.path, 0))
+                    k.log.append((now, url.path, 0, cursor))
                 self.close_connection = True
                 return
             if mode == "slow":
@@ -312,13 +320,52 @@ def serve(port, state):
                 except Exception as exc:          # a bug here should be loud
                     status, body = 500, {"error": f"{type(exc).__name__}: {exc}"}
             with k.lock:
-                k.log.append((now, url.path, status))
+                k.log.append((now, url.path, status, cursor))
+                cut = False
+                if url.path == PREFIX + "/events" and status == 200 and k.offline_after is not None:
+                    k.offline_after -= 1
+                    cut = k.offline_after <= 0
+                    if cut:
+                        k.offline_after = None
             self.reply(status, body)
+            if cut:
+                go_offline()
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    server.daemon_threads = True
-    print(f"mock kalshi on :{port}, t0={t0:.0f}, {len(k.markets)} markets", flush=True)
-    server.serve_forever()
+    class Control(Handler):
+        def do_GET(self):
+            url = urlparse(self.path)
+            q = parse_qs(url.query)
+            if url.path == "/_control":
+                mode = q.get("mode", ["normal"])[0]
+                if mode.startswith("offline_after:"):
+                    k.offline_after = int(mode.split(":")[1])
+                elif mode == "offline":
+                    go_offline()
+                else:
+                    k.mode = mode
+                return self.reply(200, {"mode": k.mode})
+            if url.path == "/_stats":
+                with k.lock:
+                    return self.reply(200, {"requests": k.log, "mode": k.mode})
+            return self.reply(404, {"error": "not found"})
+
+    control = ThreadingHTTPServer(("127.0.0.1", port + 1), Control)
+    control.daemon_threads = True
+    threading.Thread(target=control.serve_forever, daemon=True).start()
+    print(f"mock kalshi on :{port} (control :{port + 1}), t0={t0:.0f},"
+          f" {len(k.markets)} markets", flush=True)
+    # Offline means nothing is listening: connections are refused, the way
+    # they are when the network is really gone.
+    while True:
+        if k.mode == "offline":
+            time.sleep(0.2)
+            continue
+        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        server.daemon_threads = True
+        k.server = server
+        server.serve_forever(poll_interval=0.2)
+        k.server = None
+        server.server_close()
 
 
 if __name__ == "__main__":

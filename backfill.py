@@ -152,12 +152,15 @@ def fill_history(cond, params, stop, limit=None, dry_run=False):
                  " %.0f min", f"{len(spans):,}", f"{ok + failed:,}", f"{failed:,}",
                  f"{candles:,}", f"{total[0] + total[1]:,}", (time.time() - started) / 60)
         if ok == 0:
-            # Kalshi or the network is down. Nothing moved; wait and retry.
+            # A network outage never gets here -- requests wait for the link
+            # and resume where they were (venues.Link). This is Kalshi
+            # refusing the requests themselves, so try again shortly, and give
+            # up if it keeps happening.
             quiet_rounds += 1
             if quiet_rounds >= 10:
                 log.warning("ten rounds in a row failed; giving up for now")
                 break
-            stop.wait(min(60 * quiet_rounds, 600))
+            stop.wait(30)
         else:
             quiet_rounds = 0
     log.info("history: %s requests, %s failed, %s candles", f"{total[0] + total[1]:,}",

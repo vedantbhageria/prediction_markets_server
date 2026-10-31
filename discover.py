@@ -18,8 +18,11 @@ up where the last run stopped:
 
   - a restart soon after a pass waits for the next scheduled one instead of
     re-reading everything immediately
-  - the closed-market import resumes from the last page it finished, and
-    covers exactly the time the service was down -- no gap, no full re-read
+  - the open sync and the closed-market import both resume from the last
+    page they finished, inside the same scan; the closed import covers
+    exactly the time the service was down -- no gap, no full re-read
+  - while Kalshi cannot be reached, requests wait and resume the moment it
+    can (see venues.Link), so an outage pauses a pass instead of ending it
   - Kalshi's series list is refreshed once a day, not on every start
 
 Each pass is also a Kalshi scan: a row in kalshi_scans, and every market's
@@ -45,6 +48,7 @@ import store
 log = logging.getLogger("discovery")
 STATE_FILE = paths.state("discovery.json")
 OVERLAP = 3600          # each closed import re-reads the hour before the last one
+ABANDON_AFTER = 2 * 3600    # an open sync this old is started again, not resumed
 
 
 def load_state():
@@ -118,9 +122,29 @@ def _scan_finished(scan):
         log.warning("could not close scan %s: %s: %s", scan, type(exc).__name__, exc)
 
 
+def _open_job(venue, state):
+    """The open sync in progress for this venue -- resumed if one was cut
+    short, with the scan it belongs to -- or a new one."""
+    v = state.setdefault(venue, {})
+    job = v.get("open_sync")
+    if job and time.time() - job["started"] > ABANDON_AFTER:
+        log.info("%s: giving up on the open sync from %.0f min ago; starting afresh",
+                 venue, (time.time() - job["started"]) / 60)
+        job = None
+    if job:
+        log.info("%s: resuming the open sync of scan %s from %s", venue, job.get("scan"),
+                 "the last saved page" if job.get("cursor") else "the start")
+    else:
+        job = {"started": time.time(),
+               "scan": _scan_started() if venue == "kalshi" else None}
+    v["open_sync"] = job
+    save_state(state)
+    return job
+
+
 def run_pass(stop, state, prune=True):
     now = time.time()
-    scan = _scan_started() if "kalshi" in settings.VENUES else None
+    scan = None
     if "kalshi" in settings.VENUES and now - state.get("series_synced_at", 0) > 86400:
         try:
             n = catalogue.sync_series()
@@ -134,15 +158,25 @@ def run_pass(stop, state, prune=True):
         if stop.is_set():
             return
         started = time.time()
+        job = _open_job(venue, state)
+        if venue == "kalshi":
+            scan = job["scan"]
         try:
-            n = catalogue.SYNC[venue](stop, scan=scan if venue == "kalshi" else None)
+            if venue == "kalshi":
+                n = catalogue.SYNC[venue](stop, scan=scan, progress=job,
+                                          checkpoint=lambda: save_state(state))
+            else:
+                n = catalogue.SYNC[venue](stop)
             if stop.is_set():
                 return
-            state.setdefault(venue, {})["open_synced_at"] = started
+            v = state[venue]
+            v["open_synced_at"] = job["started"]
+            v.pop("open_sync", None)
             save_state(state)
             log.info("%s: open markets synced, %s rows written, %.0fs",
                      venue, f"{n:,}", time.time() - started)
         except Exception as exc:
+            # The job stays saved: the next pass carries on from its last page.
             log.warning("%s: open sync failed: %s: %s", venue, type(exc).__name__, exc)
         if stop.is_set():
             return
@@ -151,7 +185,9 @@ def run_pass(stop, state, prune=True):
         except Exception as exc:
             log.warning("%s: closed import failed: %s: %s", venue, type(exc).__name__, exc)
 
-    if scan is not None and not stop.is_set():
+    # A scan whose open sync has not finished stays open, so the next pass
+    # can complete it instead of starting another.
+    if scan is not None and not stop.is_set() and "open_sync" not in state.get("kalshi", {}):
         _scan_finished(scan)
 
     if prune and settings.MARKET_RETENTION_DAYS > 0 and not stop.is_set():
@@ -167,7 +203,8 @@ def run(stop, prune=True, after_pass=None):
     """Pass after pass until `stop` is set. `after_pass` runs after each one."""
     state = load_state()
     interval = settings.MARKET_SYNC_MINUTES * 60
-    pending = any(state.get(v, {}).get("closed_import") for v in settings.VENUES)
+    pending = any(state.get(v, {}).get("closed_import") or state.get(v, {}).get("open_sync")
+                  for v in settings.VENUES)
     last = min((state.get(v, {}).get("open_synced_at", 0) for v in settings.VENUES), default=0)
     due = time.time() if (pending or time.time() - last >= interval) else last + interval
     if due > time.time():

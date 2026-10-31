@@ -22,6 +22,9 @@ KALSHI_API_URL = (os.environ.get("KALSHI_API_URL", "").strip()
                   or "https://external-api.kalshi.com/trade-api/v2")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 REDIS_PREFIX = os.environ.get("REDIS_PREFIX", "pm:")   # tests use their own
+# While a venue cannot be reached, every request to it waits and one check
+# tries to connect this often; the moment it works they all carry on.
+NET_PROBE_SECONDS = _num("NET_PROBE_SECONDS", 30, float)
 
 # --- markets store ----------------------------------------------------------
 # The store holds markets that are still running or closed within this many
