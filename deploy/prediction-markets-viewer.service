@@ -1,0 +1,21 @@
+# The browser viewer on port 8080, on the same Tailscale address as the API.
+#
+# sudo cp deploy/prediction-markets-viewer.service /etc/systemd/system/
+# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-viewer
+
+[Unit]
+Description=prediction_markets viewer
+After=network-online.target postgresql.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+Environment=API_HOST=127.0.0.1 PYTHONUNBUFFERED=1
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python viewer.py --host ${API_HOST} --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

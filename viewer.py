@@ -377,7 +377,14 @@ PAGE = """
   {% endif %}
   </div>
 
-{% if related %}
+{% if related_placeholder %}
+  <div class="related">
+    <b>related wording</b>
+    <div class="anchor">trigram similarity &middot; tune the bar</div>
+    <span class="meta">Not built yet on the new server &mdash; this panel will return once
+      title matching is set up.</span>
+  </div>
+{% elif related %}
   <div class="related">
     <b>related wording</b>
     <div class="anchor">trigram similarity &middot; tune the bar</div>
@@ -433,7 +440,14 @@ PAGE = """
     </script>
   </div>
 {% endif %}
-{% if near %}
+{% if near_placeholder %}
+  <div class="nearby">
+    <b>nearby markets</b>
+    <div class="anchor">same expiry, strike or odds</div>
+    <span class="meta">Not built yet on the new server &mdash; this panel will return once
+      strikes and live prices are in the database.</span>
+  </div>
+{% elif near %}
   <div class="nearby">
     <b>nearby markets</b>
     <div class="anchor" id="nearhead">
@@ -578,6 +592,7 @@ def render(**kwargs):
     base = dict(groups=table_groups(), rows=None, cols=[], sql=None, error=None,
                 panels=[], selection=None, table_name=None, candle_table=None,
                 detail=None, near=None, related=None, msg=None, fetchable=False, dim="",
+                related_placeholder=False, near_placeholder=False,
                 asset_value="", ticker_value="", job=None, raw_doc=None, q="", limit=200,
                 table_more=False, table_qs="",
                 fetch_estimate=None)
@@ -1610,6 +1625,10 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
 
 @app.route("/nearby")
 def nearby_feed():
+    return jsonify({"rows": [], "kalshi_n": 0, "poly_n": 0, "placeholder": True})
+
+
+def _nearby_feed_later():
     """Nearby-market list for the current settings.
 
     Exists so changing a tolerance does not reload the page -- on a market with
@@ -1640,6 +1659,10 @@ def nearby_feed():
 
 @app.route("/related")
 def related_feed():
+    return jsonify({"rows": [], "placeholder": True})
+
+
+def _related_feed_later():
     """Related-market list at a given threshold, re-fetched as the slider moves."""
     name = request.args.get("table", "kalshi_candles")
     ident = request.args.get("ticker", "")
@@ -2022,20 +2045,12 @@ def table(name):
             detail["live"] = detail["live"] and not detail.get("is_closed")
         detail["closes_in"] = _human_delta(close - datetime.now(close.tzinfo))             if detail["live"] else None
 
+    # Related wording and nearby markets are placeholders on the new server
+    # until title matching and derived columns (strike, live price) exist.
+    # related_markets() / closing_near() are kept for when they come back.
     near = related = None
-    if ticker and name in ("kalshi_markets", "poly_markets",
-                           "kalshi_candles", "poly_candles"):
-        try:
-            related = related_markets(name, ticker,
-                                      threshold=float(request.args.get("rel", 0.25)))
-        except ValueError:
-            related = related_markets(name, ticker)
-        near = closing_near(name, ticker,
-                            hours=float(request.args.get("near", 1)),
-                            same_category=request.args.get("cat", "1") != "0",
-                            by=request.args.get("by", "time"),
-                            pct=float(request.args.get("pct", 2)),
-                            points=float(request.args.get("pts", 5)))
+    market_page = bool(ticker) and name in ("kalshi_markets", "poly_markets",
+                                            "kalshi_candles", "poly_candles")
 
     # Offer a download when a single market is open and has nothing stored.
     fetchable = bool(ticker) and name.endswith("_candles") and not rows
@@ -2079,7 +2094,8 @@ def table(name):
                   panels=build_panels(name, asset, ticker, dim),
                   selection=ticker or asset, table_name=name,
                   candle_table=candle_table, detail=detail, near=near,
-                  related=related,
+                  related=related, related_placeholder=market_page,
+                  near_placeholder=market_page,
                   msg=request.args.get("msg"), fetchable=fetchable, job=job,
                   fetch_estimate=fetch_estimate,
                   q=q, limit=cap, table_more=table_more, table_qs=table_qs,
