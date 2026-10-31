@@ -261,6 +261,27 @@ CREATE TABLE IF NOT EXISTS api_jobs (
     error          TEXT
 );
 
+-- Every API request, for the viewer's /api-usage page. The API writes them in
+-- batches a few seconds after the fact; store.prune drops them after 30 days.
+CREATE TABLE IF NOT EXISTS api_requests (
+    at          TIMESTAMPTZ NOT NULL,
+    key_id      BIGINT,                 -- NULL: no key, or a wrong one
+    method      TEXT NOT NULL,
+    path        TEXT NOT NULL,          -- as asked: /v1/markets/KX.../candles
+    endpoint    TEXT,                   -- the route: /v1/markets/{ticker}/candles
+    params      JSONB,                  -- the query string
+    tickers     TEXT[],                 -- the markets it was about
+    status      SMALLINT NOT NULL,
+    error       TEXT,                   -- the error code of a refusal
+    ms          REAL NOT NULL,
+    row_count   INTEGER,
+    bytes       BIGINT,
+    client_ip   TEXT,
+    user_agent  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS api_requests_at_idx ON api_requests (at);
+
 -- At most one unfinished job per market.
 CREATE UNIQUE INDEX IF NOT EXISTS api_jobs_open_idx ON api_jobs (ticker)
     WHERE status IN ('queued', 'running');

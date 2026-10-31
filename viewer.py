@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 from urllib.parse import quote, urlencode
 
@@ -656,7 +657,7 @@ def table_list(ttl=10):
         SELECT c.relname AS name
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'api_keys'
         ORDER BY c.relname
     """)]
     rows = [(name, db.query(f'SELECT count(*) AS n FROM "{name}"')[0]["n"])
@@ -1167,6 +1168,11 @@ HOME_PAGE = """
     <p>Both venues side by side: events, markets by sector, candles downloaded,
        and how many there would be in total.</p>
   </a>
+  <a class="card" href="/api-usage">
+    <h3>API usage</h3>
+    <p>Who is calling the API, what they ask for, errors, backfill jobs, and
+       whether collection is keeping up.</p>
+  </a>
   <a class="card" href="/table/kalshi_candles?dim=category">
     <h3>Candles</h3>
     <p>Price history per market. Anything not downloaded yet has a
@@ -1492,6 +1498,314 @@ def manage_purge():
 
     summary = ", ".join(f"{v:,} {k}" for k, v in counts.items() if v)
     return redirect(f"/manage?msg={quote('deleted ' + (summary or 'nothing'))}")
+
+
+USAGE_PAGE = """
+<!doctype html>
+<title>API usage</title>
+{% if refresh %}<meta http-equiv="refresh" content="10">{% endif %}
+<style>
+ body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1150px;
+        padding: 0 1rem; color: #222; line-height: 1.5; }
+ header { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+ header h2 { margin: 0 0 6px; } header h2 a { text-decoration: none; color: inherit; }
+ header .links a { font-size: 13px; margin-right: 12px; }
+ .bar-nav { font-size: 13px; margin: 4px 0 14px; color: #666; }
+ .bar-nav a, .bar-nav b { margin-right: 10px; }
+ .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+ .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; }
+ .tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+ .tile span { color: #666; font-size: 12px; }
+ .tile.bad b { color: #b3261e; }
+ .col { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin-top: 16px; }
+ .col h3 { margin: 0 0 8px; font-size: 15px; }
+ .col h3 small { color: #888; font-weight: normal; font-size: 12px; margin-left: 6px; }
+ .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+ .two .col { margin-top: 16px; min-width: 0; }
+ .scroll { overflow-x: auto; }
+ table { border-collapse: collapse; width: 100%; font-size: 13px; }
+ th, td { border-bottom: 1px solid #eee; padding: 3px 6px; text-align: right; white-space: nowrap; }
+ th:first-child, td:first-child, td.l, th.l { text-align: left; }
+ th { color: #666; font-weight: normal; font-size: 12px; }
+ td.wrap { white-space: normal; word-break: break-all; text-align: left; }
+ .s2 { color: #1e7b34; } .s4 { color: #b06000; } .s5 { color: #b3261e; font-weight: 600; }
+ .muted { color: #888; }
+ .k { border-top: 3px solid #2a6099; }
+ dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 13px; }
+ dt { color: #666; } dd { margin: 0; font-variant-numeric: tabular-nums; }
+ svg { display: block; width: 100%; height: 130px; }
+ .note { background: #f7f7f7; border-left: 3px solid #bbb; padding: 10px 14px; font-size: 13px; margin: 16px 0 0; }
+ @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
+</style>
+
+<header>
+  <h2><a href="/">prediction_markets</a> &middot; API usage</h2>
+  <span class="links">
+    <a href="/stats">stats</a>
+    <a href="/table/kalshi_markets?dim=category">tables</a>
+  </span>
+</header>
+<div class="bar-nav">
+  window:
+  {% for w in windows %}{% if w == window %}<b>{{ w }}</b>{% else %}<a href="?window={{ w }}{% if not refresh %}&refresh=off{% endif %}">{{ w }}</a>{% endif %}{% endfor %}
+  &middot;
+  {% if refresh %}refreshing every 10 s &middot; <a href="?window={{ window }}&refresh=off">pause</a>
+  {% else %}paused &middot; <a href="?window={{ window }}">resume</a>{% endif %}
+  &middot; <span class="muted">as of {{ now }}</span>
+</div>
+
+{% if missing %}
+<div class="note">Nothing recorded yet: the API starts writing to <code>api_requests</code>
+the first time it runs with this version.</div>
+{% else %}
+
+<div class="tiles">
+  <div class="tile"><b>{{ '{:,}'.format(t.n) }}</b><span>requests</span></div>
+  <div class="tile{% if t.errors %} bad{% endif %}"><b>{{ '{:,}'.format(t.errors) }}</b>
+    <span>errors{% if t.n %} &middot; {{ '%.1f'|format(100 * t.errors / t.n) }}%{% endif %}</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(t.limited) }}</b><span>rate-limited (429)</span></div>
+  <div class="tile"><b>{{ ms(t.p50) }}</b><span>typical response</span></div>
+  <div class="tile"><b>{{ ms(t.p95) }}</b><span>slowest 5% above</span></div>
+  <div class="tile"><b>{{ size(t.bytes) }}</b><span>sent &middot; {{ '{:,}'.format(t.rows_sent) }} rows</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(t.backfills) }}</b><span>backfills pushed</span></div>
+</div>
+
+<div class="col">
+  <h3>Requests over time <small>{{ bucket_label }} per bar &middot; red = errors &middot; busiest bar {{ '{:,}'.format(peak) }}</small></h3>
+  <svg viewBox="0 0 1000 130" preserveAspectRatio="none" role="img" aria-label="requests per {{ bucket_label }}">
+    <line x1="0" y1="120" x2="1000" y2="120" stroke="#ddd"/>
+    {% for b in bars %}
+    <rect x="{{ b.x }}" y="{{ 120 - b.h }}" width="{{ b.w }}" height="{{ b.h }}" fill="#9db6d6"><title>{{ b.label }}: {{ b.n }} requests, {{ b.e }} errors</title></rect>
+    {% if b.eh %}<rect x="{{ b.x }}" y="{{ 120 - b.eh }}" width="{{ b.w }}" height="{{ b.eh }}" fill="#d9534f"/>{% endif %}
+    {% endfor %}
+  </svg>
+  <div class="muted" style="font-size:12px;display:flex;justify-content:space-between"><span>{{ first_label }}</span><span>now</span></div>
+</div>
+
+<div class="two">
+  <div class="col">
+    <h3>Who is calling</h3>
+    <div class="scroll"><table>
+      <tr><th>key</th><th class="l">machine / client</th><th class="l">ip</th><th>requests</th><th>errors</th><th>last</th></tr>
+      {% for r in callers %}
+      <tr><td>{{ r.name }}</td><td class="l">{{ r.user_agent or '' }}</td><td class="l">{{ r.client_ip or '' }}</td>
+          <td>{{ '{:,}'.format(r.n) }}</td><td>{{ r.e }}</td><td>{{ when(r.last) }}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">no requests in this window</td></tr>{% endfor %}
+    </table></div>
+  </div>
+  <div class="col">
+    <h3>Most asked-for markets</h3>
+    <div class="scroll"><table>
+      <tr><th>ticker</th><th>requests</th><th>last</th></tr>
+      {% for r in tickers %}
+      <tr><td><a href="/table/kalshi_candles?ticker={{ r.t|urlencode }}">{{ r.t }}</a></td>
+          <td>{{ '{:,}'.format(r.n) }}</td><td>{{ when(r.last) }}</td></tr>
+      {% else %}<tr><td colspan="3" class="muted">none in this window</td></tr>{% endfor %}
+    </table></div>
+  </div>
+</div>
+
+<div class="col">
+  <h3>Endpoints</h3>
+  <div class="scroll"><table>
+    <tr><th>endpoint</th><th>requests</th><th>errors</th><th>typical</th><th>slowest 5%</th><th>rows</th><th>sent</th></tr>
+    {% for r in endpoints %}
+    <tr><td>{{ r.method }} {{ r.ep }}</td><td>{{ '{:,}'.format(r.n) }}</td><td>{{ r.e }}</td>
+        <td>{{ ms(r.p50) }}</td><td>{{ ms(r.p95) }}</td><td>{{ '{:,}'.format(r.rows_sent) }}</td><td>{{ size(r.bytes) }}</td></tr>
+    {% else %}<tr><td colspan="7" class="muted">none in this window</td></tr>{% endfor %}
+  </table></div>
+</div>
+
+<div class="col">
+  <h3>Latest requests <small>the last 50, whatever the window</small></h3>
+  <div class="scroll"><table>
+    <tr><th>time</th><th class="l">key</th><th class="l">request</th><th>status</th><th>ms</th><th>rows</th><th>sent</th><th class="l">client</th></tr>
+    {% for r in recent %}
+    <tr><td>{{ when(r.at) }}</td><td class="l">{{ r.name or '—' }}</td>
+        <td class="wrap">{{ r.method }} {{ r.path }}{% if r.query %}<span class="muted">?{{ r.query }}</span>{% endif %}</td>
+        <td class="s{{ r.status // 100 }}">{{ r.status }}{% if r.error %} {{ r.error }}{% endif %}</td>
+        <td>{{ '%.0f'|format(r.ms) }}</td><td>{{ '{:,}'.format(r.row_count) if r.row_count is not none else '' }}</td>
+        <td>{{ size(r.bytes) if r.bytes else '' }}</td><td class="l muted">{{ r.user_agent or '' }}</td></tr>
+    {% else %}<tr><td colspan="8" class="muted">nothing yet</td></tr>{% endfor %}
+  </table></div>
+</div>
+
+<div class="two">
+  <div class="col">
+    <h3>Recent errors <small>in this window</small></h3>
+    <div class="scroll"><table>
+      <tr><th>time</th><th class="l">request</th><th>status</th></tr>
+      {% for r in errors %}
+      <tr><td>{{ when(r.at) }}</td><td class="wrap">{{ r.method }} {{ r.path }}{% if r.query %}<span class="muted">?{{ r.query }}</span>{% endif %}</td>
+          <td class="s{{ r.status // 100 }}">{{ r.status }} {{ r.error or '' }}</td></tr>
+      {% else %}<tr><td colspan="3" class="muted">no errors</td></tr>{% endfor %}
+    </table></div>
+  </div>
+  <div class="col">
+    <h3>Backfill jobs <small>the last 15</small></h3>
+    <div class="scroll"><table>
+      <tr><th>job</th><th class="l">ticker</th><th class="l">status</th><th>progress</th><th>candles</th><th>asked</th></tr>
+      {% for j in jobs %}
+      <tr><td>{{ j.job_id }}</td><td class="l"><a href="/table/kalshi_candles?ticker={{ j.ticker|urlencode }}">{{ j.ticker }}</a></td>
+          <td class="l {{ 's5' if j.status == 'failed' else 's2' if j.status == 'done' else '' }}" title="{{ j.error or '' }}">{{ j.status }}</td>
+          <td>{{ j.requests_done }}/{{ j.requests_total if j.requests_total is not none else '?' }}</td>
+          <td>{{ '{:,}'.format(j.candles) }}</td><td>{{ when(j.requested_at) }}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">none yet</td></tr>{% endfor %}
+    </table></div>
+  </div>
+</div>
+{% endif %}
+
+<div class="col k">
+  <h3>Collection <small>what the API's data depends on</small></h3>
+  <div class="two" style="gap:24px">
+    <dl>
+      <dt>Kalshi</dt><dd>{% if c.down %}<span class="s5">unreachable since {{ c.down }}</span>{% else %}<span class="s2">reachable</span>{% endif %}</dd>
+      <dt>live candles</dt><dd>{% if c.live %}up to {{ c.live.upto }} &middot; {{ c.live.behind }} s behind &middot; last cycle {{ c.live.seconds }} s{% else %}<span class="muted">no heartbeat</span>{% endif %}</dd>
+      <dt>hot list</dt><dd>{% if c.hot %}{{ '{:,}'.format(c.hot.n) }} markets (cap {{ '{:,}'.format(c.hot.cap) }}){% else %}<span class="muted">none published</span>{% endif %}</dd>
+      <dt>budget</dt><dd>{{ c.budget }} requests/min{% if c.factor and c.factor < 1 %} &middot; <span class="s5">cut to {{ '%.0f'|format(100 * c.factor) }}% after a 429</span>{% endif %}</dd>
+    </dl>
+    <table>
+      <tr><th>Kalshi requests by</th><th>last minute</th><th>last hour</th></tr>
+      {% for name, one, hour in c.used %}
+      <tr><td>{{ name }}</td><td>{{ one if one is not none else '?' }}</td><td>{{ '{:,}'.format(hour) if hour is not none else '?' }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+"""
+
+# window: (length in seconds, seconds per bar, what a bar is called)
+USAGE_WINDOWS = {"1h": (3600, 60, "1 min"), "24h": (86400, 600, "10 min"),
+                 "7d": (7 * 86400, 3600, "1 hour"), "30d": (30 * 86400, 6 * 3600, "6 hours")}
+USAGE_TZ = ZoneInfo(os.environ.get("PGTIMEZONE", "Asia/Kolkata"))
+
+
+def _ms(value):
+    if value is None:
+        return "—"
+    return f"{value:.0f} ms" if value < 1000 else f"{value / 1000:.1f} s"
+
+
+def _size(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def _when(dt):
+    if dt is None:
+        return ""
+    local = dt.astimezone(USAGE_TZ)
+    recent = datetime.now(USAGE_TZ) - local < timedelta(hours=20)
+    return local.strftime("%H:%M:%S" if recent else "%d %b %H:%M")
+
+
+def _query(params):
+    return "&".join(f"{k}={v}" for k, v in (params or {}).items())
+
+
+def _collection():
+    """The same signals the API's /v1/status reads, from Redis."""
+    import json as _json
+    out = {"budget": settings.KALSHI_REQUESTS_PER_MIN, "down": None, "live": None, "hot": None,
+           "factor": None, "used": []}
+    try:
+        r = ratelimit.client()
+        host = settings.KALSHI_API_URL.split("/")[2]
+        down = r.get(f"{settings.REDIS_PREFIX}down:{host}")
+        if down:
+            out["down"] = _when(datetime.fromtimestamp(float(down), timezone.utc))
+        live = r.get(ratelimit.KEY + "live")
+        if live:
+            live = _json.loads(live)
+            out["live"] = {"upto": _when(datetime.fromtimestamp(live["minute"], timezone.utc)),
+                           "behind": round(time.time() - live["minute"]),
+                           "seconds": live["seconds"]}
+        hot = r.get(ratelimit.KEY + "hot")
+        if hot:
+            hot = _json.loads(hot)
+            out["hot"] = {"n": len(hot["tickers"]), "cap": hot["cap"]}
+        out["factor"] = ratelimit.factor()
+        out["used"] = [(s, ratelimit.used(s, 1), ratelimit.used(s, 60)) for s in ratelimit.SHARE]
+    except Exception:
+        pass
+    return out
+
+
+@app.route("/api-usage")
+def api_usage():
+    window = request.args.get("window", "24h")
+    if window not in USAGE_WINDOWS:
+        window = "24h"
+    length, step, bucket_label = USAGE_WINDOWS[window]
+    refresh = request.args.get("refresh") != "off"
+    page = dict(windows=list(USAGE_WINDOWS), window=window, refresh=refresh,
+                bucket_label=bucket_label, now=datetime.now(USAGE_TZ).strftime("%H:%M:%S"),
+                ms=_ms, size=_size, when=_when, c=_collection(), missing=False)
+    if not db.query("SELECT to_regclass('api_requests') IS NOT NULL AS ok")[0]["ok"]:
+        return render_template_string(USAGE_PAGE, **page, missing=True)
+
+    since = {"length": length}
+    where = "r.at >= now() - make_interval(secs => %(length)s)"
+    t = db.query(f"""
+        SELECT count(*) AS n, count(*) FILTER (WHERE status >= 400) AS errors,
+               count(*) FILTER (WHERE status = 429) AS limited,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ms) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95,
+               COALESCE(sum(bytes), 0) AS bytes, COALESCE(sum(row_count), 0) AS rows_sent,
+               count(*) FILTER (WHERE endpoint = '/v1/backfill' AND method = 'POST'
+                                AND status = 202) AS backfills
+        FROM api_requests r WHERE {where}""", since)[0]
+
+    counts = {int(r["b"]): r for r in db.query(f"""
+        SELECT floor(EXTRACT(EPOCH FROM r.at) / %(step)s) * %(step)s AS b, count(*) AS n,
+               count(*) FILTER (WHERE status >= 400) AS e
+        FROM api_requests r WHERE {where} GROUP BY 1""", {**since, "step": step})}
+    end = int(time.time() // step * step)
+    starts = list(range(end - (length // step - 1) * step, end + step, step))
+    peak = max([counts[s]["n"] for s in starts if s in counts] or [0])
+    width = 1000 / len(starts)
+    bars = []
+    for i, s in enumerate(starts):
+        c = counts.get(s)
+        n, e = (c["n"], c["e"]) if c else (0, 0)
+        bars.append({"x": round(i * width, 2), "w": round(max(width - 1, 0.5), 2),
+                     "h": round(110 * n / peak, 1) if peak else 0,
+                     "eh": round(110 * e / peak, 1) if peak else 0, "n": n, "e": e,
+                     "label": _when(datetime.fromtimestamp(s, timezone.utc))})
+
+    callers = db.query(f"""
+        SELECT COALESCE(k.name, '(no valid key)') AS name, r.user_agent, r.client_ip,
+               count(*) AS n, count(*) FILTER (WHERE r.status >= 400) AS e, max(r.at) AS last
+        FROM api_requests r LEFT JOIN api_keys k USING (key_id)
+        WHERE {where} GROUP BY 1, 2, 3 ORDER BY n DESC LIMIT 20""", since)
+    endpoints = db.query(f"""
+        SELECT r.method, COALESCE(r.endpoint, r.path) AS ep, count(*) AS n,
+               count(*) FILTER (WHERE r.status >= 400) AS e,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY r.ms) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY r.ms) AS p95,
+               COALESCE(sum(r.row_count), 0) AS rows_sent, COALESCE(sum(r.bytes), 0) AS bytes
+        FROM api_requests r WHERE {where} GROUP BY 1, 2 ORDER BY n DESC LIMIT 25""", since)
+    tickers = db.query(f"""
+        SELECT tk AS t, count(*) AS n, max(r.at) AS last
+        FROM api_requests r, unnest(r.tickers) AS tk
+        WHERE {where} GROUP BY tk ORDER BY n DESC LIMIT 20""", since)
+    recent = db.query("""
+        SELECT r.*, k.name FROM api_requests r LEFT JOIN api_keys k USING (key_id)
+        ORDER BY r.at DESC LIMIT 50""")
+    errors = db.query(f"""
+        SELECT r.* FROM api_requests r WHERE {where} AND r.status >= 400
+        ORDER BY r.at DESC LIMIT 20""", since)
+    for r in recent + errors:
+        r["query"] = _query(r["params"])
+    jobs = db.query("SELECT * FROM api_jobs ORDER BY job_id DESC LIMIT 15")
+    return render_template_string(
+        USAGE_PAGE, **page, t=t, bars=bars, peak=peak, callers=callers, endpoints=endpoints,
+        tickers=tickers, recent=recent, errors=errors, jobs=jobs,
+        first_label=_when(datetime.fromtimestamp(starts[0], timezone.utc)))
 
 
 @app.route("/stats")

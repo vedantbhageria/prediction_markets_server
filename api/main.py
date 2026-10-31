@@ -7,17 +7,18 @@ Interactive docs are served at /docs.
 """
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 import psycopg2
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 
 import db
 import ratelimit
 import store
-from api import __version__, config, jobs
+from api import __version__, config, jobs, usage
 from api.common import ApiError, error_response
 from api.routes import health, v1
 
@@ -28,7 +29,7 @@ log = logging.getLogger("api")
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
-    ratelimit.DEFAULT = "warm"
+    ratelimit.DEFAULT = "api"
     db.get_pool(1, config.DB_POOL)
     try:
         store.ensure_schema()
@@ -37,10 +38,13 @@ async def lifespan(app: FastAPI):
         log.warning("could not check the schema: %s: %s", type(exc).__name__, exc)
     worker = jobs.Worker(config.JOB_WORKERS)
     worker.start()
+    writer = usage.Writer()
+    writer.start()
     try:
         yield
     finally:
         worker.shutdown()
+        writer.shutdown()
         db.close_pool()
 
 
@@ -52,13 +56,22 @@ app.include_router(v1.router)
 
 
 @app.middleware("http")
-async def rate_headers(request: Request, call_next):
-    response = await call_next(request)
+async def observe(request: Request, call_next):
+    """Rate-limit headers on every answer, and a line in api_requests."""
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Answered by the 500 handler further out; record it here.
+        usage.record(request, Response(status_code=500, headers={"X-Error-Code": "internal"}),
+                     (time.perf_counter() - started) * 1000)
+        raise
     limits = getattr(request.state, "ratelimit", None)
     if limits:
         response.headers["X-RateLimit-Limit"] = str(limits[0])
         response.headers["X-RateLimit-Remaining"] = str(limits[1])
         response.headers["X-RateLimit-Reset"] = str(limits[2])
+    usage.record(request, response, (time.perf_counter() - started) * 1000)
     return response
 
 

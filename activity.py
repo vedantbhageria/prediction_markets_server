@@ -179,13 +179,14 @@ def warm_backlog():
 def hot_cap(warm=None):
     """How many markets can be fetched every minute inside the budget.
 
-    budget (after any 429 cut) - headroom - what discovery used over the last
-    hour - one pass over the warm backlog per scan interval, then 100 markets
-    per remaining request per minute.
+    budget (after any 429 cut) - headroom - what discovery and API backfills
+    used over the last hour - one pass over the warm backlog per scan
+    interval, then 100 markets per remaining request per minute.
     """
     budget = settings.KALSHI_REQUESTS_PER_MIN * ratelimit.factor()
     discover = ratelimit.used("discover", 60)
     discover = 20 if not discover else discover / 60
+    discover += (ratelimit.used("api", 60) or 0) / 60
     warm = warm_backlog() if warm is None else warm
     warm_rate = math.ceil(warm / 100) / max(settings.MARKET_SYNC_MINUTES, 1)
     spare = budget * (1 - settings.BUDGET_HEADROOM) - discover - warm_rate

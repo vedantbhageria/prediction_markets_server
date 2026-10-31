@@ -18,6 +18,10 @@ activity.py read the mock once, starts the API on port 18100 and checks:
   8  a duplicate push is refused while one is running, and a job cut short
      by the API dying is picked up again when it restarts
   9  pmapi.py returns the same data as DataFrames
+ 10  every request is recorded in api_requests -- key, status, error code,
+     rows, bytes, User-Agent -- requests still answer while that table cannot
+     be written, their records arrive once it can, and the viewer's
+     /api-usage page shows them
 """
 
 import io
@@ -32,7 +36,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = Path("/tmp/pmapitest")
-MOCK_PORT, API_PORT = 18090, 18100
+MOCK_PORT, API_PORT, VIEWER_PORT = 18090, 18100, 18110
 API = f"http://127.0.0.1:{API_PORT}"
 
 ENV = dict(os.environ,
@@ -481,6 +485,68 @@ def test_client(key, ticker, many):
     say("pmapi client checked")
 
 
+def test_usage(keys, ticker):
+    def rows(sql, *args):
+        return db.query(sql, args or None)
+
+    time.sleep(2 * 3 + 1)                   # the recorder writes every 3 s
+    slow = rows("SELECT r.status, r.error FROM api_requests r JOIN api_keys k USING (key_id)"
+                " WHERE k.name = 'slow' ORDER BY r.at")
+    check([r["status"] for r in slow] == [200] * 5 + [429] and slow[-1]["error"] == "rate_limited",
+          f"10 the five-a-minute key's six requests are recorded: {[r['status'] for r in slow]}")
+    anon = rows("SELECT count(*) AS n FROM api_requests WHERE key_id IS NULL AND status = 401"
+                " AND error IN ('missing_key', 'invalid_key')")[0]["n"]
+    check(anon >= 3, f"10 requests without a valid key are recorded ({anon})")
+    c = rows("SELECT * FROM api_requests WHERE endpoint = '/v1/markets/{ticker}/candles'"
+             " AND params->>'fill' = 'raw' AND %s = ANY(tickers) AND status = 200"
+             " ORDER BY at LIMIT 1", ticker)
+    check(bool(c) and c[0]["row_count"] is not None and c[0]["bytes"] > 0 and c[0]["ms"] > 0,
+          f"10 a candles request is recorded with its ticker, rows, bytes and time: {c[:1]}")
+    pushed = rows("SELECT count(*) AS n FROM api_requests WHERE endpoint = '/v1/backfill'"
+                  " AND method = 'POST' AND status = 202 AND tickers IS NOT NULL")[0]["n"]
+    check(pushed >= 13, f"10 backfill pushes are recorded with their ticker ({pushed})")
+    ua = rows("SELECT count(*) AS n FROM api_requests WHERE user_agent LIKE 'pmapi/1.0 (%%)'")[0]["n"]
+    check(ua > 0, f"10 pmapi's requests carry the machine name ({ua})")
+
+    # The table goes away: requests must not notice, and nothing is lost.
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE api_requests RENAME TO api_requests_away")
+    api = Api(keys["full"])
+    codes = [api.get("/v1/markets", q=f"usage-probe-{i}", limit=1).status_code for i in range(5)]
+    time.sleep(7)
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE api_requests_away RENAME TO api_requests")
+    check(codes == [200] * 5, f"10 requests answer while their records cannot be written: {codes}")
+    time.sleep(10)
+    n = rows("SELECT count(*) AS n FROM api_requests WHERE params->>'q' LIKE 'usage-probe-%%'")[0]["n"]
+    check(n == 5, f"10 ...and their records arrive once the table is back ({n} of 5)")
+
+    # The viewer's page, every window.
+    procs["viewer"] = subprocess.Popen(
+        [sys.executable, "viewer.py", "--host", "127.0.0.1", "--port", str(VIEWER_PORT)],
+        cwd=ROOT, env=dict(ENV, VIEWER_USER="", VIEWER_PASSWORD_HASH=""),
+        stdout=open(WORK / "viewer.log", "a"), stderr=subprocess.STDOUT)
+    page = None
+    for _ in range(60):
+        try:
+            page = requests.get(f"http://127.0.0.1:{VIEWER_PORT}/api-usage", timeout=30)
+            break
+        except requests.ConnectionError:
+            time.sleep(0.5)
+    check(page is not None and page.status_code == 200 and ticker in page.text
+          and "rate_limited" in page.text and "slow" in page.text,
+          f"10 the viewer's /api-usage page shows the requests"
+          f" ({page.status_code if page is not None else 'no answer'})")
+    for w in ("1h", "7d", "30d"):
+        r = requests.get(f"http://127.0.0.1:{VIEWER_PORT}/api-usage?window={w}&refresh=off",
+                         timeout=30)
+        check(r.status_code == 200 and "Requests over time" in r.text, f"10 /api-usage?window={w}")
+    stop("viewer")
+    say("request records and the usage page checked")
+
+
 def main():
     t0, keys = setup()
     markets, _ = mock_kalshi.build(t0)
@@ -499,7 +565,9 @@ def main():
         test_lists(api)
         test_duplicate_and_restart(api, by_ticker, kinds["hot"][5])
         test_client(keys["full"], picks[0], picks[:4])
+        test_usage(keys, picks[0])
     finally:
+        stop("viewer")
         stop("api")
         stop("mock")
     print()

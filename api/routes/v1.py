@@ -515,6 +515,7 @@ def backfill(request: Request, body: dict = BACKFILL_BODY):
     start, end = parse_time(body.get("from"), "from"), parse_time(body.get("to"), "to")
     if start is not None and end is not None and start >= end:
         raise ApiError(400, "invalid_parameter", "from must be before to")
+    request.state.tickers = [ticker.strip()]
     job = jobs.enqueue(request.state.key["key_id"], ticker.strip(), start, end)
     return json_response(jobs.describe(job), 202,
                          {"Location": f"/v1/backfill/{job['job_id']}"})

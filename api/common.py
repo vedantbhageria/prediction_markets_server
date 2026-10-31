@@ -31,7 +31,8 @@ class ApiError(Exception):
 
 
 def error_response(status, code, message, headers=None):
-    return json_response({"error": {"code": code, "message": message}}, status, headers)
+    return json_response({"error": {"code": code, "message": message}}, status,
+                         {**(headers or {}), "X-Error-Code": code})
 
 
 def not_found(what, name):
@@ -161,6 +162,7 @@ def table(rows, columns, fmt, key="data", meta=None, next_token=None, headers=No
     the rows; csv and parquet carry only the table, and the next page's token
     in the X-Next-Page-Token header."""
     headers = dict(headers or {})
+    headers["X-Row-Count"] = str(len(rows))
     if fmt == "json":
         body = dict(meta or {})
         body[key] = rows

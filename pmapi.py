@@ -23,6 +23,7 @@ Timestamps or Unix seconds; naive ones are taken as UTC.
 
 import io
 import os
+import socket
 import time
 from datetime import datetime, timezone
 
@@ -72,6 +73,8 @@ class Client:
         self.timeout, self.retries = timeout, retries
         self.session = requests.Session()
         self.session.headers["X-API-Key"] = key
+        # The machine's name, so the server's usage page can tell callers apart.
+        self.session.headers["User-Agent"] = f"pmapi/1.0 ({socket.gethostname()})"
 
     # -- plumbing -----------------------------------------------------------
 

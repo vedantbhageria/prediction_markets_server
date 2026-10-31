@@ -3,8 +3,8 @@
 A job re-downloads one market's candles over a stretch of time -- by default
 its whole life inside the store window -- and overwrites what is stored, with
 the same fetcher and bookkeeping as live.py and backfill.py. Its requests use
-the shared Kalshi budget at "warm" priority: after hot markets, before
-backfill.py.
+the shared Kalshi budget at "api" priority -- the same as warm: after hot
+markets, before backfill.py -- counted on a line of their own.
 
 Jobs live in api_jobs, so they outlast the API: one cut short by a restart is
 queued again and run from the start (fetching is idempotent).
@@ -121,7 +121,7 @@ class Worker:
         return rows[0] if rows else None
 
     def _loop(self):
-        with ratelimit.using("warm"):
+        with ratelimit.using("api"):
             while not self.stop.is_set():
                 try:
                     job = self._claim()

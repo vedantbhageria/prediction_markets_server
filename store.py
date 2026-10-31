@@ -193,6 +193,7 @@ def prune(days):
                                 "  OR s.started_at < now() - interval '1 day')", False),
         ("kalshi scans", "DELETE FROM kalshi_scans WHERE started_at < now() - interval '7 days'",
          False),
+        ("api requests", "DELETE FROM api_requests WHERE at < now() - interval '30 days'", False),
     ]
     counts = {}
     with connection() as conn:

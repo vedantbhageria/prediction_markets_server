@@ -29,7 +29,7 @@ import settings
 log = logging.getLogger("ratelimit")
 
 # Share of the bucket a priority may draw down.
-SHARE = {"discover": 1.0, "hot": 1.0, "warm": 0.75, "backfill": 0.5}
+SHARE = {"discover": 1.0, "hot": 1.0, "warm": 0.75, "api": 0.75, "backfill": 0.5}
 KEY = settings.REDIS_PREFIX + "kalshi:"
 MIN_FACTOR = 0.1
 FALLBACK_SHARE = 1 / 3      # of the budget, per process, while Redis is away
