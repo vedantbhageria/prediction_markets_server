@@ -167,6 +167,7 @@ def main():
         print(f"FAILED: {len(failures)} checks")
         sys.exit(1)
     print("PASSED: every check")
+    db.execute("DROP SCHEMA IF EXISTS pm_monitor_test CASCADE")       # kept only when a check fails
 
 
 if __name__ == "__main__":

@@ -1,31 +1,54 @@
 # prediction_markets
 
-Kalshi and Polymarket market data in PostgreSQL, with a browser viewer for
-comparing the same question across both venues.
+Kalshi (and, later, Polymarket) market data in PostgreSQL on a 24/7 Ubuntu
+server: every market open now or closed in the last 30 days, with one-minute
+trade candles, a browser viewer and an HTTP API for Python.
 
-The whole design on one page: [`docs/architecture.html`](docs/architecture.html).
+- The whole design on one page: [`docs/architecture.html`](docs/architecture.html)
+  (second tab: the API).
+- The stress test of 1 Nov 2026 and what it fixed:
+  [`docs/stress-test-2026-11-01.html`](docs/stress-test-2026-11-01.html).
 
-## Collection: four programs
+## The six programs
+
+| Program | What it does | Runs |
+|---|---|---|
+| `discover.py` | lists every open market, imports closed ones, deletes expired ones | always, a pass every 15 min |
+| `activity.py` | scores each scan, publishes the hot list | always |
+| `live.py` | one-minute candles: hot markets every minute, others as they trade | always |
+| `backfill.py` | fills history; `--report`, `--verify`, `--refetch` | always; reruns every 15 min once done |
+| `api/` | the HTTP API, 4 processes | always |
+| `viewer.py` | the browser viewer, `/api-usage` charts | always |
+
+They run as systemd services, so they start on boot and restart if they crash:
 
 ```bash
-python discover.py      # markets store, every 15 min        (service)
-python activity.py      # scores each scan, picks hot list   (service)
-python live.py          # one-minute candles, every minute   (service)
-python backfill.py      # history and repairs                (by hand)
+sudo bash deploy/install-services.sh        # once: moves them from tmux to services
+systemctl status prediction-markets-live    # any of the six
+tail -f ~/logs/live.log                     # each writes ~/logs/<program>.log
+sudo systemctl restart prediction-markets-api
 ```
 
-**discover.py** lists every open market every `MARKET_SYNC_MINUTES` (default
-15), imports markets that closed since the last pass, and deletes markets that
-closed more than `MARKET_RETENTION_DAYS` (default 30) ago. Each pass is also a
-scan: every Kalshi market's volume, and when it was read, goes to
-`kalshi_observations`. Progress is saved in `data/state/discovery.json`.
+**Don't restart them while the network refuses new connections** (Kalshi
+unreachable in the logs): each keeps working on the connections it already has,
+and a restart closes them until the network comes back. The install script
+checks for this and refuses unless given `--force`.
+
+## Collection
+
+**discover.py** lists every open market every `MARKET_SYNC_MINUTES` (15),
+imports markets that closed since the last pass, and deletes markets that
+closed more than `MARKET_RETENTION_DAYS` (30) ago, candles included. Each pass
+is also a scan: every market's volume, and when it was read, goes to
+`kalshi_observations`. Progress is saved in `data/state/discovery.json`, so a
+pass cut short resumes from its last page.
 
 **activity.py** scores each finished scan inside PostgreSQL: a smoothed
 contracts-per-minute rate with a one-hour half-life, seeded for new markets
 with total volume / time open. A market whose volume did not move had no
 trades, so its candles are marked complete without a request. The busiest
-markets, as many as the request budget can fetch every minute, go on the hot
-list in Redis.
+markets, as many as the budget can fetch every minute, go on the hot list in
+Redis.
 
 **live.py** fetches the hot markets every minute, then every market that traded
 since its last fetch. Only minutes with a trade are stored.
@@ -40,9 +63,78 @@ python backfill.py --ticker T --refetch --from 2026-10-20 --to 2026-10-21
 ```
 
 Every Kalshi request from every program comes out of one budget,
-`KALSHI_REQUESTS_PER_MIN` (default 240), shared through Redis
-(`ratelimit.py`): no 60 s window can exceed it, hot markets go first, backfill
-gets what is left, and a 429 halves it for everyone.
+`KALSHI_REQUESTS_PER_MIN` (240), shared through Redis (`ratelimit.py`): no
+60-second window above it, no second above `KALSHI_MAX_PER_SECOND` (15), hot
+markets first, backfill on what is left, and a 429 halves it for everyone.
+While Kalshi cannot be reached every request waits, checking every 30 s, and
+carries on from where it was.
+
+## The API
+
+```bash
+.venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 4
+```
+
+Public at `https://theonealpha.tail947e08.ts.net:8443` through Tailscale Funnel;
+every request needs a key in `X-API-Key`. Interactive docs at `/docs`, a summary
+in the API tab of `docs/architecture.html`.
+
+```bash
+python -m api.keys create laptop                # prints the key once
+python -m api.keys create notebook --read-only  # cannot push backfills
+python -m api.keys list
+python -m api.keys revoke laptop
+```
+
+From Python, copy `pmapi.py` next to your notebook:
+
+```python
+from pmapi import Client
+pm = Client("https://theonealpha.tail947e08.ts.net:8443", key="pm_...")
+
+pm.markets(q="bitcoin", status="open")           # DataFrame
+pm.candles("KXBTCD-...", "5m", start="2026-10-25")  # indexed by ts, forward-filled
+pm.closes(["A", "B"], "1h")                      # one close column per market
+pm.wait(pm.backfill("KXBTCD-..."))               # download it again, now
+```
+
+Candles come at `1m 5m 15m 1h 4h 1d`, forward-filled by default (only where
+every trade is known to be stored) or `fill=raw`, as JSON, CSV or Parquet.
+Pushed backfills run inside the API, batched so queued jobs share requests,
+and survive restarts: a running job with no heartbeat for `API_JOB_LEASE_SECONDS`
+is taken over by another process.
+
+## The viewer
+
+`viewer.py --host 100.106.150.105 --port 8080`, behind `VIEWER_USER` /
+`VIEWER_PASSWORD_HASH`, public at `https://theonealpha.tail947e08.ts.net`.
+
+- tables, filters, candle charts, manage, stats -- as before
+- on a market's page: **related wording** (title similarity, with a slider) and
+  **nearby markets** (same expiry, same odds, or both)
+- **`/api-usage`**: who calls the API and what for, response times, the Kalshi
+  budget by program, backfill progress, live lag. Its history is one JSON line
+  a minute in `data/state/monitor/`, kept 30 days.
+
+## Tests
+
+Run on the server, from the project folder. Each builds its own schema and Redis
+prefix, never touches the real data, and drops its schema again when it passes.
+
+```bash
+.venv/bin/python tests/activity_test.py    # scoring rules, case by case      (seconds)
+.venv/bin/python tests/ratelimit_test.py   # the shared budget, 3 processes   (3.5 min)
+.venv/bin/python tests/panels_test.py      # related wording, nearby markets  (30 s)
+.venv/bin/python tests/monitor_test.py     # the usage charts' minute files   (10 s)
+.venv/bin/python tests/api_test.py         # every endpoint, keys, jobs       (2 min)
+.venv/bin/python tests/live_test.py        # the collectors end to end, with faults (35 min)
+.venv/bin/python tests/stress_test.py      # everything under load           (25 min)
+```
+
+`tests/mock_kalshi.py` is the simulated Kalshi they run against: trades known in
+advance, so every stored candle can be checked.
+
+## Files
 
 ```
 discover.py    the pass schedule and its saved progress
@@ -54,53 +146,32 @@ ratelimit.py   the shared request budget
 catalogue.py   one venue listing -> series / events / markets rows
 venues.py      the Kalshi and Polymarket calls
 store.py       schema setup, upserts, pruning, candle writes
-settings.py    every tunable, read from .env
+monitor.py     the minute-by-minute record behind /api-usage
+viewer.py      the browser viewer
+api/           the HTTP API; pmapi.py is its Python client
+settings.py    every tunable, read from .env (see .env.example)
 schema.sql     tables; timescale.sql adds hypertables and rollups
-tests/         mock Kalshi, end-to-end run, activity and rate-limit tests
+deploy/        systemd services and install-services.sh
+tests/         the tests above and the simulated Kalshi
+docs/          the architecture page and the stress-test report
 ```
 
-It creates the tables itself and **deletes markets that closed more than
-`MARKET_RETENTION_DAYS` ago, candles included**. Do not point it at a database
-holding history you want to keep without `--no-prune` or
+`.env` needs `PGPASSWORD`; copy `.env.example`, which lists every setting.
+
+The programs create the tables themselves and **delete markets that closed more
+than `MARKET_RETENTION_DAYS` ago, candles included**. Do not point them at a
+database holding history you want to keep without `--no-prune` or
 `MARKET_RETENTION_DAYS=0`.
 
-## Batch scrapers (the original pipeline)
+## The original batch scrapers
 
-```
-kalshi_markets.py    step 1 -- build the market catalogue (cheap, ~200 requests)
-kalshi_candles.py    step 2 -- candles for those markets (expensive, 1 request each)
-kalshi_perps.py      perpetual futures: instruments + candles
-polymarket.py        Polymarket markets and candles (both steps in one)
-
-paths.py             every file location
-db.py                PostgreSQL connection (reads .env)
-schema.sql           tables
-load_db.py           load the scraped files into PostgreSQL
-viewer.py            web viewer at http://127.0.0.1:8080
-start_postgres.ps1   start/stop/status for the local server
-
-data/                see paths.py for what lives where
-```
-
-## Running it
-
-```bash
-python kalshi_markets.py --category all --list-only   # catalogue
-python kalshi_candles.py --min-volume 10000           # candles for a subset
-python polymarket.py --tag all --days 7               # the other venue
-python load_db.py --schema                            # once
-python load_db.py                                     # load whatever exists
-python viewer.py                                      # browse
-```
-
-`.env` needs `PGPASSWORD`; copy `.env.example` and fill it in.
+`kalshi_markets.py`, `kalshi_candles.py`, `kalshi_perps.py`, `polymarket.py` and
+`load_db.py` are the run-by-hand pipeline this replaced; they still work.
 
 ## Two things worth knowing
 
-**Kalshi's catalogue is 95% combination markets.** `KXMVE*` tickers are
-auto-generated multi-leg parlays -- 2.05M of 2.17M rows. They are archived in
-`data/markets_all.jsonl` and excluded from `data/markets.jsonl`, which holds the
-113k real markets.
+**Kalshi's catalogue is mostly combination markets.** `KXMVE*` tickers are
+auto-generated multi-leg parlays; discovery leaves them out.
 
 **Polymarket candles are not real OHLC.** Its price history endpoint returns one
 forward-filled point per minute rather than aggregated trades, so open, high,

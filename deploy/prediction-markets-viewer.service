@@ -1,21 +1,30 @@
-# The browser viewer on port 8080, on the same Tailscale address as the API.
+# prediction_markets viewer. The browser viewer, on the Tailscale address; Funnel publishes it at
+# https://theonealpha.tail947e08.ts.net. Until Tailscale is up the address
+# cannot be bound, so it retries every 5 seconds.
 #
-# sudo cp deploy/prediction-markets-viewer.service /etc/systemd/system/
-# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-viewer
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-viewer
+#   tail -f ~/logs/viewer.log
+#   sudo systemctl restart prediction-markets-viewer
 
 [Unit]
 Description=prediction_markets viewer
-After=network-online.target postgresql.service tailscaled.service
+After=network-online.target postgresql.service redis-server.service tailscaled.service
 Wants=network-online.target
 
 [Service]
 User=theonealpha
 WorkingDirectory=/home/theonealpha/prediction_markets_server
-Environment=API_HOST=127.0.0.1 PYTHONUNBUFFERED=1
 EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
-ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python viewer.py --host ${API_HOST} --port 8080
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python viewer.py --host 100.106.150.105 --port 8080
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
 Restart=always
 RestartSec=5
+StandardOutput=append:/home/theonealpha/logs/viewer.log
+StandardError=append:/home/theonealpha/logs/viewer.log
 
 [Install]
 WantedBy=multi-user.target

@@ -1,24 +1,28 @@
-# Live one-minute Kalshi candles: hot markets every minute, warm ones as
-# they trade.
+# prediction_markets live candles. One-minute candles: hot markets every minute, warm ones as they trade.
 #
-# sudo cp deploy/prediction-markets-live.service /etc/systemd/system/
-# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-live
-# journalctl -u prediction-markets-live -f
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-live
+#   tail -f ~/logs/live.log
+#   sudo systemctl restart prediction-markets-live
 
 [Unit]
 Description=prediction_markets live candles
 After=network-online.target postgresql.service redis-server.service
 Wants=network-online.target
-Requires=postgresql.service
 
 [Service]
 User=theonealpha
 WorkingDirectory=/home/theonealpha/prediction_markets_server
-ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python live.py
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
 Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python live.py
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
 Restart=always
 RestartSec=10
-TimeoutStopSec=60
+StandardOutput=append:/home/theonealpha/logs/live.log
+StandardError=append:/home/theonealpha/logs/live.log
 
 [Install]
 WantedBy=multi-user.target

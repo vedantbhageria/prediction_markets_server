@@ -341,6 +341,8 @@ def main():
     else:
         print("PASSED: no gaps, no wrong candles, budget held, hot list right")
     print(run("report", "backfill.py", "--report"))
+    if not failures:
+        db.execute("DROP SCHEMA IF EXISTS pm_live_test CASCADE")   # kept only when a check fails
     return 1 if failures else 0
 
 

@@ -2,6 +2,7 @@
 
     .venv/bin/python tests/stress_test.py                 # every phase, ~30 min
     .venv/bin/python tests/stress_test.py reads load      # just these phases
+    .venv/bin/python tests/stress_test.py --keep          # leave its schemas behind
 
 Everything runs in its own schema (pm_stress, pm_stress_collect), its own
 Redis (a redis-server started here, on port 6391) and against the simulated
@@ -888,6 +889,10 @@ def main():
     finally:
         for name in list(procs):
             stop(name)
+    if "--keep" not in sys.argv:
+        # Its data is millions of candles with background jobs of their own.
+        for schema in (SCHEMA, "pm_stress_collect"):
+            db.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
     results["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()
     say("done; results in " + str(RESULTS))

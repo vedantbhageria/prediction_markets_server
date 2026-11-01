@@ -194,4 +194,7 @@ class Activity(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    outcome = unittest.main(verbosity=2, exit=False).result
+    if outcome.wasSuccessful():
+        db.execute("DROP SCHEMA IF EXISTS pm_unit_test CASCADE")   # kept only when a test fails
+    sys.exit(0 if outcome.wasSuccessful() else 1)

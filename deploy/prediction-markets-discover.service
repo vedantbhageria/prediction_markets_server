@@ -1,28 +1,28 @@
-# Keeps the markets store current, and records what each scan saw for
-# activity.py.
+# prediction_markets market discovery. Lists every open market and imports closed ones, every 15 minutes.
 #
-# sudo cp deploy/prediction-markets-discover.service /etc/systemd/system/
-# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-discover
-# journalctl -u prediction-markets-discover -f
-#
-# Progress is saved in data/state/discovery.json, so a restart resumes rather
-# than starting over.
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-discover
+#   tail -f ~/logs/discover.log
+#   sudo systemctl restart prediction-markets-discover
 
 [Unit]
 Description=prediction_markets market discovery
 After=network-online.target postgresql.service redis-server.service
 Wants=network-online.target
-Requires=postgresql.service
 
 [Service]
 User=theonealpha
 WorkingDirectory=/home/theonealpha/prediction_markets_server
-ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python discover.py
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
 Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python discover.py
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
 Restart=always
 RestartSec=30
-# SIGTERM lets the current page finish and the progress be saved.
-TimeoutStopSec=90
+StandardOutput=append:/home/theonealpha/logs/discover.log
+StandardError=append:/home/theonealpha/logs/discover.log
 
 [Install]
 WantedBy=multi-user.target

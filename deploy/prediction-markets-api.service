@@ -1,12 +1,10 @@
-# The HTTP API (FastAPI under uvicorn).
+# prediction_markets API. The data API, as four processes. It listens on 127.0.0.1:8000; Tailscale
+# Funnel publishes it at https://theonealpha.tail947e08.ts.net:8443.
 #
-# sudo cp deploy/prediction-markets-api.service /etc/systemd/system/
-# sudo systemctl daemon-reload && sudo systemctl enable --now prediction-markets-api
-# journalctl -u prediction-markets-api -f
-#
-# Where it listens comes from API_HOST / API_PORT in .env. On the server
-# API_HOST is the machine's Tailscale address, so the API is reachable from
-# your own devices and not from the office network.
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-api
+#   tail -f ~/logs/api.log
+#   sudo systemctl restart prediction-markets-api
 
 [Unit]
 Description=prediction_markets API
@@ -16,14 +14,16 @@ Wants=network-online.target
 [Service]
 User=theonealpha
 WorkingDirectory=/home/theonealpha/prediction_markets_server
-# Four worker processes: one Python process tops out near 40 requests a
-# second; backfill jobs move between workers by lease, so any number is safe.
-Environment=API_HOST=127.0.0.1 API_PORT=8000 API_WORKERS=4 PYTHONUNBUFFERED=1
 EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
-ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/uvicorn api.main:app --host ${API_HOST} --port ${API_PORT} --workers ${API_WORKERS}
-# If Tailscale is not up yet at boot the address cannot be bound; try again.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 4
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
 Restart=always
 RestartSec=5
+StandardOutput=append:/home/theonealpha/logs/api.log
+StandardError=append:/home/theonealpha/logs/api.log
 
 [Install]
 WantedBy=multi-user.target

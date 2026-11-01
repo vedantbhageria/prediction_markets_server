@@ -597,6 +597,7 @@ def main():
             print("  -", f)
         sys.exit(1)
     print("PASSED: every check")
+    db.execute("DROP SCHEMA IF EXISTS pm_api_test CASCADE")       # kept only when a check fails
 
 
 if __name__ == "__main__":
