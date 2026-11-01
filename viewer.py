@@ -6,6 +6,8 @@ Binds to localhost only. Read-only: anything that isn't a SELECT is refused.
 """
 
 import argparse
+import json
+import math
 import re
 import sys
 import bisect
@@ -23,6 +25,7 @@ from flask import (Flask, Response, jsonify, redirect, render_template_string,
 from psycopg2.extras import RealDictCursor, execute_values
 
 import db
+import monitor
 import paths
 from db import connection
 import fetch as candle_fetch
@@ -644,11 +647,12 @@ def table_list(ttl=10):
     """
     if _COUNTS["rows"] is not None and time.monotonic() - _COUNTS["at"] < ttl:
         return _COUNTS["rows"]
+    # The API's own tables are left out: /api-usage shows what is in them.
     names = [r["name"] for r in db.query("""
         SELECT c.relname AS name
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'api_keys'
+        WHERE n.nspname = 'public' AND c.relkind = 'r' AND left(c.relname, 4) <> 'api_'
         ORDER BY c.relname
     """)]
     rows = [(name, db.query(f'SELECT count(*) AS n FROM "{name}"')[0]["n"])
@@ -1504,27 +1508,42 @@ USAGE_PAGE = """
  .bar-nav { font-size: 13px; margin: 4px 0 14px; color: #666; }
  .bar-nav a, .bar-nav b { margin-right: 10px; }
  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
- .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; }
+ .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; border-left-width: 4px; }
  .tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
  .tile span { color: #666; font-size: 12px; }
- .tile.bad b { color: #b3261e; }
- .col { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin-top: 16px; }
+ .tile.good { border-left-color: #3a9a5b; } .tile.warn { border-left-color: #d9a400; }
+ .tile.bad { border-left-color: #d9534f; } .tile.bad b { color: #b3261e; }
+ .col { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin-top: 16px; min-width: 0; }
  .col h3 { margin: 0 0 8px; font-size: 15px; }
  .col h3 small { color: #888; font-weight: normal; font-size: 12px; margin-left: 6px; }
  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
- .two .col { margin-top: 16px; min-width: 0; }
+ .two .col { margin-top: 16px; }
+ svg.chart { display: block; width: 100%; height: auto; }
+ .axis { display: flex; justify-content: space-between; font-size: 11px; color: #888; }
+ .legend { font-size: 12px; color: #555; margin-top: 6px; }
+ .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+             margin: 0 4px 0 12px; vertical-align: -1px; }
+ .legend i:first-child { margin-left: 0; }
+ .progress { background: #eef1f5; border-radius: 6px; height: 14px; overflow: hidden; }
+ .progress div { background: #2a6099; height: 100%; }
+ .job { display: grid; grid-template-columns: minmax(0, 2fr) 3fr auto; gap: 10px;
+        align-items: center; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
+ .job .progress { height: 10px; }
+ .job .progress div.done { background: #3a9a5b; } .job .progress div.failed { background: #d9534f; }
+ .hbar { display: grid; grid-template-columns: minmax(0, 2fr) 3fr 50px; gap: 8px;
+         align-items: center; font-size: 13px; padding: 2px 0; }
+ .hbar a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .hbar .progress { height: 10px; } .hbar span { text-align: right; color: #555; }
+ .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+ .muted { color: #888; } .s2 { color: #1e7b34; } .s4 { color: #b06000; } .s5 { color: #b3261e; font-weight: 600; }
+ details { margin-top: 16px; }
+ summary { cursor: pointer; font-weight: 600; font-size: 14px; }
  .scroll { overflow-x: auto; }
  table { border-collapse: collapse; width: 100%; font-size: 13px; }
  th, td { border-bottom: 1px solid #eee; padding: 3px 6px; text-align: right; white-space: nowrap; }
  th:first-child, td:first-child, td.l, th.l { text-align: left; }
  th { color: #666; font-weight: normal; font-size: 12px; }
  td.wrap { white-space: normal; word-break: break-all; text-align: left; }
- .s2 { color: #1e7b34; } .s4 { color: #b06000; } .s5 { color: #b3261e; font-weight: 600; }
- .muted { color: #888; }
- .k { border-top: 3px solid #2a6099; }
- dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 13px; }
- dt { color: #666; } dd { margin: 0; font-variant-numeric: tabular-nums; }
- svg { display: block; width: 100%; height: 130px; }
  .note { background: #f7f7f7; border-left: 3px solid #bbb; padding: 10px 14px; font-size: 13px; margin: 16px 0 0; }
  @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
 </style>
@@ -1545,35 +1564,94 @@ USAGE_PAGE = """
   &middot; <span class="muted">as of {{ now }}</span>
 </div>
 
-{% if missing %}
-<div class="note">Nothing recorded yet: the API starts writing to <code>api_requests</code>
-the first time it runs with this version.</div>
-{% else %}
-
 <div class="tiles">
-  <div class="tile"><b>{{ '{:,}'.format(t.n) }}</b><span>requests</span></div>
-  <div class="tile{% if t.errors %} bad{% endif %}"><b>{{ '{:,}'.format(t.errors) }}</b>
+  <div class="tile {{ 'bad' if c.down else 'good' }}"><b>{{ 'down' if c.down else 'up' }}</b>
+    <span>Kalshi{% if c.down %} &middot; since {{ c.down }}{% endif %}</span></div>
+  <div class="tile {{ 'good' if c.live and c.live.behind < 240 else 'warn' if c.live and c.live.behind < 900 else 'bad' }}">
+    <b>{{ (c.live.behind|string + ' s') if c.live else '—' }}</b><span>live candles behind the clock</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(c.hot.n) if c.hot else '—' }}</b><span>hot markets (every minute)</span></div>
+  <div class="tile {{ 'warn' if c.factor and c.factor < 1 else '' }}"><b>{{ c.used_now }}<span style="font-size:14px;color:#888"> / {{ c.limit }}</span></b>
+    <span>Kalshi requests last minute{% if c.factor and c.factor < 1 %} &middot; cut to {{ '%.0f'|format(100 * c.factor) }}%{% endif %}</span></div>
+  {% if not missing %}
+  <div class="tile"><b>{{ '{:,}'.format(t.n) }}</b><span>API requests &middot; {{ window }}</span></div>
+  <div class="tile {{ 'bad' if t.errors else 'good' }}"><b>{{ '{:,}'.format(t.errors) }}</b>
     <span>errors{% if t.n %} &middot; {{ '%.1f'|format(100 * t.errors / t.n) }}%{% endif %}</span></div>
-  <div class="tile"><b>{{ '{:,}'.format(t.limited) }}</b><span>rate-limited (429)</span></div>
-  <div class="tile"><b>{{ ms(t.p50) }}</b><span>typical response</span></div>
-  <div class="tile"><b>{{ ms(t.p95) }}</b><span>slowest 5% above</span></div>
+  <div class="tile"><b>{{ ms(t.p50) }}</b><span>typical response &middot; slowest 5% {{ ms(t.p95) }}</span></div>
   <div class="tile"><b>{{ size(t.bytes) }}</b><span>sent &middot; {{ '{:,}'.format(t.rows_sent) }} rows</span></div>
-  <div class="tile"><b>{{ '{:,}'.format(t.backfills) }}</b><span>backfills pushed</span></div>
+  {% endif %}
 </div>
 
 <div class="col">
-  <h3>Requests over time <small>{{ bucket_label }} per bar &middot; red = errors &middot; busiest bar {{ '{:,}'.format(peak) }}</small></h3>
-  <svg viewBox="0 0 1000 130" preserveAspectRatio="none" role="img" aria-label="requests per {{ bucket_label }}">
-    <line x1="0" y1="120" x2="1000" y2="120" stroke="#ddd"/>
-    {% for b in bars %}
-    <rect x="{{ b.x }}" y="{{ 120 - b.h }}" width="{{ b.w }}" height="{{ b.h }}" fill="#9db6d6"><title>{{ b.label }}: {{ b.n }} requests, {{ b.e }} errors</title></rect>
-    {% if b.eh %}<rect x="{{ b.x }}" y="{{ 120 - b.eh }}" width="{{ b.w }}" height="{{ b.eh }}" fill="#d9534f"/>{% endif %}
-    {% endfor %}
-  </svg>
-  <div class="muted" style="font-size:12px;display:flex;justify-content:space-between"><span>{{ first_label }}</span><span>now</span></div>
+  <h3>Backfill <small>history still to download</small></h3>
+  {% if bf.left is not none %}
+  <div class="two" style="gap:24px;align-items:center">
+    <div>
+      <div class="big">{{ '%.1f'|format(bf.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">done</span></div>
+      <div class="progress"><div style="width:{{ bf.pct }}%"></div></div>
+      <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(bf.left) }} markets left
+        &middot; {{ bf.pace }}</div>
+    </div>
+    <div>{{ bf.chart|safe }}</div>
+  </div>
+  {% else %}<span class="muted">no count yet: the first appears within ten minutes of the viewer starting</span>{% endif %}
+</div>
+
+<div class="col">
+  <h3>Kalshi request budget <small>requests per minute, by program &middot; dashed line = the limit</small></h3>
+  {{ budget.chart|safe }}
+  <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  <div class="legend">{% for name, colour in budget.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}
+    {% if budget.down %}<i style="background:#f6d5d4"></i>Kalshi unreachable{% endif %}</div>
+</div>
+
+<div class="col">
+  <h3>Live candles: seconds behind the clock <small>about 120 s is normal</small></h3>
+  {{ behind_chart|safe }}
+  <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+</div>
+
+{% if missing %}
+<div class="note">No API requests recorded yet: the API starts writing to <code>api_requests</code>
+the first time it runs with this version.</div>
+{% else %}
+<div class="col">
+  <h3>API requests <small>per {{ bucket_label }}, by caller &middot; red mark = errors in that stretch</small></h3>
+  {{ calls.chart|safe }}
+  <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  <div class="legend">{% for name, colour in calls.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}</div>
+</div>
+
+<div class="col">
+  <h3>API response time <small>typical and slowest 5%, per {{ bucket_label }}</small></h3>
+  {{ speed_chart|safe }}
+  <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  <div class="legend"><i style="background:#2a6099"></i>typical<i style="background:#e07b39"></i>slowest 5%</div>
 </div>
 
 <div class="two">
+  <div class="col">
+    <h3>Most asked-for markets</h3>
+    {% for r in tickers %}
+    <div class="hbar"><a href="/table/kalshi_candles?ticker={{ r.t|urlencode }}" title="{{ r.t }}">{{ r.t }}</a>
+      <div class="progress"><div style="width:{{ r.pct }}%"></div></div><span>{{ '{:,}'.format(r.n) }}</span></div>
+    {% else %}<span class="muted">none in this window</span>{% endfor %}
+  </div>
+  <div class="col">
+    <h3>Backfill jobs <small>pushed through the API, latest first</small></h3>
+    {% for j in jobs %}
+    <div class="job">
+      <a href="/table/kalshi_candles?ticker={{ j.ticker|urlencode }}" title="{{ j.error or j.ticker }}"
+         style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j.ticker }}</a>
+      <div class="progress"><div class="{{ j.status }}" style="width:{{ j.pct }}%"></div></div>
+      <span class="{{ 's5' if j.status == 'failed' else 's2' if j.status == 'done' else '' }}">{{ j.status }}
+        &middot; {{ '{:,}'.format(j.candles) }} candles</span>
+    </div>
+    {% else %}<span class="muted">none yet</span>{% endfor %}
+  </div>
+</div>
+
+<details>
+  <summary>Details: callers, endpoints, latest requests, errors</summary>
   <div class="col">
     <h3>Who is calling</h3>
     <div class="scroll"><table>
@@ -1585,43 +1663,28 @@ the first time it runs with this version.</div>
     </table></div>
   </div>
   <div class="col">
-    <h3>Most asked-for markets</h3>
+    <h3>Endpoints</h3>
     <div class="scroll"><table>
-      <tr><th>ticker</th><th>requests</th><th>last</th></tr>
-      {% for r in tickers %}
-      <tr><td><a href="/table/kalshi_candles?ticker={{ r.t|urlencode }}">{{ r.t }}</a></td>
-          <td>{{ '{:,}'.format(r.n) }}</td><td>{{ when(r.last) }}</td></tr>
-      {% else %}<tr><td colspan="3" class="muted">none in this window</td></tr>{% endfor %}
+      <tr><th>endpoint</th><th>requests</th><th>errors</th><th>typical</th><th>slowest 5%</th><th>rows</th><th>sent</th></tr>
+      {% for r in endpoints %}
+      <tr><td>{{ r.method }} {{ r.ep }}</td><td>{{ '{:,}'.format(r.n) }}</td><td>{{ r.e }}</td>
+          <td>{{ ms(r.p50) }}</td><td>{{ ms(r.p95) }}</td><td>{{ '{:,}'.format(r.rows_sent) }}</td><td>{{ size(r.bytes) }}</td></tr>
+      {% else %}<tr><td colspan="7" class="muted">none in this window</td></tr>{% endfor %}
     </table></div>
   </div>
-</div>
-
-<div class="col">
-  <h3>Endpoints</h3>
-  <div class="scroll"><table>
-    <tr><th>endpoint</th><th>requests</th><th>errors</th><th>typical</th><th>slowest 5%</th><th>rows</th><th>sent</th></tr>
-    {% for r in endpoints %}
-    <tr><td>{{ r.method }} {{ r.ep }}</td><td>{{ '{:,}'.format(r.n) }}</td><td>{{ r.e }}</td>
-        <td>{{ ms(r.p50) }}</td><td>{{ ms(r.p95) }}</td><td>{{ '{:,}'.format(r.rows_sent) }}</td><td>{{ size(r.bytes) }}</td></tr>
-    {% else %}<tr><td colspan="7" class="muted">none in this window</td></tr>{% endfor %}
-  </table></div>
-</div>
-
-<div class="col">
-  <h3>Latest requests <small>the last 50, whatever the window</small></h3>
-  <div class="scroll"><table>
-    <tr><th>time</th><th class="l">key</th><th class="l">request</th><th>status</th><th>ms</th><th>rows</th><th>sent</th><th class="l">client</th></tr>
-    {% for r in recent %}
-    <tr><td>{{ when(r.at) }}</td><td class="l">{{ r.name or '—' }}</td>
-        <td class="wrap">{{ r.method }} {{ r.path }}{% if r.query %}<span class="muted">?{{ r.query }}</span>{% endif %}</td>
-        <td class="s{{ r.status // 100 }}">{{ r.status }}{% if r.error %} {{ r.error }}{% endif %}</td>
-        <td>{{ '%.0f'|format(r.ms) }}</td><td>{{ '{:,}'.format(r.row_count) if r.row_count is not none else '' }}</td>
-        <td>{{ size(r.bytes) if r.bytes else '' }}</td><td class="l muted">{{ r.user_agent or '' }}</td></tr>
-    {% else %}<tr><td colspan="8" class="muted">nothing yet</td></tr>{% endfor %}
-  </table></div>
-</div>
-
-<div class="two">
+  <div class="col">
+    <h3>Latest requests <small>the last 50, whatever the window</small></h3>
+    <div class="scroll"><table>
+      <tr><th>time</th><th class="l">key</th><th class="l">request</th><th>status</th><th>ms</th><th>rows</th><th>sent</th><th class="l">client</th></tr>
+      {% for r in recent %}
+      <tr><td>{{ when(r.at) }}</td><td class="l">{{ r.name or '—' }}</td>
+          <td class="wrap">{{ r.method }} {{ r.path }}{% if r.query %}<span class="muted">?{{ r.query }}</span>{% endif %}</td>
+          <td class="s{{ r.status // 100 }}">{{ r.status }}{% if r.error %} {{ r.error }}{% endif %}</td>
+          <td>{{ '%.0f'|format(r.ms) }}</td><td>{{ '{:,}'.format(r.row_count) if r.row_count is not none else '' }}</td>
+          <td>{{ size(r.bytes) if r.bytes else '' }}</td><td class="l muted">{{ r.user_agent or '' }}</td></tr>
+      {% else %}<tr><td colspan="8" class="muted">nothing yet</td></tr>{% endfor %}
+    </table></div>
+  </div>
   <div class="col">
     <h3>Recent errors <small>in this window</small></h3>
     <div class="scroll"><table>
@@ -1632,44 +1695,18 @@ the first time it runs with this version.</div>
       {% else %}<tr><td colspan="3" class="muted">no errors</td></tr>{% endfor %}
     </table></div>
   </div>
-  <div class="col">
-    <h3>Backfill jobs <small>the last 15</small></h3>
-    <div class="scroll"><table>
-      <tr><th>job</th><th class="l">ticker</th><th class="l">status</th><th>progress</th><th>candles</th><th>asked</th></tr>
-      {% for j in jobs %}
-      <tr><td>{{ j.job_id }}</td><td class="l"><a href="/table/kalshi_candles?ticker={{ j.ticker|urlencode }}">{{ j.ticker }}</a></td>
-          <td class="l {{ 's5' if j.status == 'failed' else 's2' if j.status == 'done' else '' }}" title="{{ j.error or '' }}">{{ j.status }}</td>
-          <td>{{ j.requests_done }}/{{ j.requests_total if j.requests_total is not none else '?' }}</td>
-          <td>{{ '{:,}'.format(j.candles) }}</td><td>{{ when(j.requested_at) }}</td></tr>
-      {% else %}<tr><td colspan="6" class="muted">none yet</td></tr>{% endfor %}
-    </table></div>
-  </div>
-</div>
+</details>
 {% endif %}
-
-<div class="col k">
-  <h3>Collection <small>what the API's data depends on</small></h3>
-  <div class="two" style="gap:24px">
-    <dl>
-      <dt>Kalshi</dt><dd>{% if c.down %}<span class="s5">unreachable since {{ c.down }}</span>{% else %}<span class="s2">reachable</span>{% endif %}</dd>
-      <dt>live candles</dt><dd>{% if c.live %}up to {{ c.live.upto }} &middot; {{ c.live.behind }} s behind &middot; last cycle {{ c.live.seconds }} s{% else %}<span class="muted">no heartbeat</span>{% endif %}</dd>
-      <dt>hot list</dt><dd>{% if c.hot %}{{ '{:,}'.format(c.hot.n) }} markets (cap {{ '{:,}'.format(c.hot.cap) }}){% else %}<span class="muted">none published</span>{% endif %}</dd>
-      <dt>budget</dt><dd>{{ c.budget }} requests/min{% if c.factor and c.factor < 1 %} &middot; <span class="s5">cut to {{ '%.0f'|format(100 * c.factor) }}% after a 429</span>{% endif %}</dd>
-    </dl>
-    <table>
-      <tr><th>Kalshi requests by</th><th>last minute</th><th>last hour</th></tr>
-      {% for name, one, hour in c.used %}
-      <tr><td>{{ name }}</td><td>{{ one if one is not none else '?' }}</td><td>{{ '{:,}'.format(hour) if hour is not none else '?' }}</td></tr>
-      {% endfor %}
-    </table>
-  </div>
-</div>
 """
 
 # window: (length in seconds, seconds per bar, what a bar is called)
 USAGE_WINDOWS = {"1h": (3600, 60, "1 min"), "24h": (86400, 600, "10 min"),
                  "7d": (7 * 86400, 3600, "1 hour"), "30d": (30 * 86400, 6 * 3600, "6 hours")}
 USAGE_TZ = ZoneInfo(os.environ.get("PGTIMEZONE", "Asia/Kolkata"))
+PROGRAM_COLOURS = [("discover", "#9aa3ad"), ("hot", "#e07b39"), ("warm", "#d9a400"),
+                   ("api", "#8e6bbf"), ("backfill", "#2a6099")]
+CALLER_COLOURS = ["#2a6099", "#e07b39", "#3a9a5b", "#8e6bbf", "#c9a227", "#9aa3ad"]
+CHART_W, CHART_H = 1000, 150
 
 
 def _ms(value):
@@ -1698,11 +1735,94 @@ def _query(params):
     return "&".join(f"{k}={v}" for k, v in (params or {}).items())
 
 
+def _nice(top):
+    """A round number at or above `top`, for an axis."""
+    if top <= 0:
+        return 1
+    step = 10 ** int(math.floor(math.log10(top)))
+    for m in (1, 2, 2.5, 5, 10):
+        if m * step >= top:
+            return m * step
+    return 10 * step
+
+
+def _bars_svg(buckets, colours, limit=None, shade=None, marks=None):
+    """Stacked bars. buckets: [{name: value}] oldest first; colours: [(name,
+    colour)] bottom first; limit: [value] per bucket, drawn dashed; shade:
+    [bool] per bucket, tinted red behind; marks: [bool] per bucket, a red
+    tick on top. Returns the <svg> as a string."""
+    n = len(buckets) or 1
+    top = _nice(max([sum(b.values()) for b in buckets] + [max(limit or [0])] + [0]) * 1.05)
+    w = CHART_W / n
+    out = [f'<svg class="chart" viewBox="0 0 {CHART_W} {CHART_H + 14}" role="img">']
+    for frac in (0.5, 1):
+        y = CHART_H - CHART_H * frac
+        out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eee"/>'
+                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{top * frac:,.0f}</text>')
+    for i, b in enumerate(buckets):
+        x = i * w
+        if shade and shade[i]:
+            out.append(f'<rect x="{x:.2f}" y="0" width="{w:.2f}" height="{CHART_H}" fill="#f6d5d4"/>')
+        y = CHART_H
+        for name, colour in colours:
+            v = b.get(name, 0)
+            if v <= 0:
+                continue
+            h = CHART_H * v / top
+            y -= h
+            out.append(f'<rect x="{x:.2f}" y="{y:.2f}" width="{max(w - 0.6, 0.4):.2f}" height="{h:.2f}"'
+                       f' fill="{colour}"><title>{name}: {v:,.1f}</title></rect>')
+        if marks and marks[i]:
+            out.append(f'<rect x="{x:.2f}" y="{y - 4:.2f}" width="{max(w - 0.6, 1.5):.2f}" height="3"'
+                       f' fill="#d9534f"/>')
+    if limit:
+        pts = " ".join(f"{i * w:.1f},{CHART_H - CHART_H * v / top:.1f} {(i + 1) * w:.1f},"
+                       f"{CHART_H - CHART_H * v / top:.1f}" for i, v in enumerate(limit))
+        out.append(f'<polyline points="{pts}" fill="none" stroke="#b3261e" stroke-width="1.5"'
+                   f' stroke-dasharray="6 4"/>')
+    out.append(f'<line x1="0" x2="{CHART_W}" y1="{CHART_H}" y2="{CHART_H}" stroke="#ccc"/></svg>')
+    return "".join(out)
+
+
+def _lines_svg(series, height=CHART_H, unit=""):
+    """Lines. series: [(colour, [value or None] oldest first)]; gaps break the line."""
+    values = [v for _, vals in series for v in vals if v is not None]
+    top = _nice(max(values + [0]) * 1.05)
+    n = max([len(vals) for _, vals in series] + [1])
+    step = CHART_W / max(n - 1, 1)
+    out = [f'<svg class="chart" viewBox="0 0 {CHART_W} {height + 14}" role="img">']
+    for frac in (0.5, 1):
+        y = height - height * frac
+        out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eee"/>'
+                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{top * frac:,.0f}{unit}</text>')
+    for colour, vals in series:
+        run = []
+        for i, v in enumerate(vals + [None]):
+            if v is None:
+                if len(run) == 1:
+                    out.append(f'<circle cx="{run[0][0]:.1f}" cy="{run[0][1]:.1f}" r="2" fill="{colour}"/>')
+                elif run:
+                    pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in run)
+                    out.append(f'<polyline points="{pts}" fill="none" stroke="{colour}" stroke-width="1.8"/>')
+                run = []
+            else:
+                run.append((i * step, height - height * v / top))
+    out.append(f'<line x1="0" x2="{CHART_W}" y1="{height}" y2="{height}" stroke="#ccc"/></svg>')
+    return "".join(out)
+
+
+def _caller(name, agent):
+    """'laptop · BHAGE-PC' from a key name and a User-Agent."""
+    agent = agent or ""
+    m = re.match(r"pmapi/[\d.]+ \((.+)\)", agent)
+    who = m.group(1) if m else (agent.split("/")[0] or "unknown client")
+    return f"{name or 'no valid key'} · {who}"
+
+
 def _collection():
     """The same signals the API's /v1/status reads, from Redis."""
-    import json as _json
-    out = {"budget": settings.KALSHI_REQUESTS_PER_MIN, "down": None, "live": None, "hot": None,
-           "factor": None, "used": []}
+    out = {"limit": settings.KALSHI_REQUESTS_PER_MIN, "down": None, "live": None, "hot": None,
+           "factor": None, "used_now": "—"}
     try:
         r = ratelimit.client()
         host = settings.KALSHI_API_URL.split("/")[2]
@@ -1711,19 +1831,65 @@ def _collection():
             out["down"] = _when(datetime.fromtimestamp(float(down), timezone.utc))
         live = r.get(ratelimit.KEY + "live")
         if live:
-            live = _json.loads(live)
-            out["live"] = {"upto": _when(datetime.fromtimestamp(live["minute"], timezone.utc)),
-                           "behind": round(time.time() - live["minute"]),
-                           "seconds": live["seconds"]}
+            live = json.loads(live)
+            out["live"] = {"behind": round(time.time() - live["minute"])}
         hot = r.get(ratelimit.KEY + "hot")
         if hot:
-            hot = _json.loads(hot)
+            hot = json.loads(hot)
             out["hot"] = {"n": len(hot["tickers"]), "cap": hot["cap"]}
         out["factor"] = ratelimit.factor()
-        out["used"] = [(s, ratelimit.used(s, 1), ratelimit.used(s, 60)) for s in ratelimit.SHARE]
+        out["used_now"] = sum(ratelimit.used(s, 1) or 0 for s in ratelimit.SHARE)
     except Exception:
         pass
     return out
+
+
+def _monitor_charts(starts, step, length):
+    """Budget, live lag and backfill, from monitor.py's minute files."""
+    lines = monitor.read(starts[0])
+    by_bucket = {}
+    for line in lines:
+        by_bucket.setdefault(line["t"] // step * step, []).append(line)
+    budget, limit, down, behind = [], [], [], []
+    for s in starts:
+        got = by_bucket.get(s, [])
+        minutes = max(len(got), 1)
+        totals = {}
+        for line in got:
+            for k, v in line.get("used", {}).items():
+                totals[k] = totals.get(k, 0) + v
+        budget.append({k: v / minutes for k, v in totals.items()})
+        limit.append(max([line.get("limit", 0) * line.get("factor", 1) for line in got] or
+                         [settings.KALSHI_REQUESTS_PER_MIN]))
+        down.append(any(line.get("up") is False for line in got))
+        lags = [line["behind"] for line in got if "behind" in line]
+        behind.append(sum(lags) / len(lags) if lags else None)
+
+    counts = [(line["t"], line["left"]) for line in lines if "left" in line]
+    bf = {"left": None}
+    if counts:
+        left = counts[-1][1]
+        # The planner's row estimate: instant, and close enough for a bar.
+        total = max(db.query("SELECT reltuples::bigint AS n FROM pg_class"
+                             " WHERE oid = 'kalshi_tracking'::regclass")[0]["n"] or 0, left)
+        recent = [c for c in counts if c[0] >= counts[-1][0] - 6 * 3600]
+        rate = ((recent[0][1] - recent[-1][1]) / ((recent[-1][0] - recent[0][0]) / 3600)
+                if len(recent) > 1 and recent[-1][0] > recent[0][0] else 0)
+        if left == 0:
+            pace = "complete"
+        elif rate > 0:
+            hours = left / rate
+            pace = (f"{rate:,.0f} markets an hour over the last {(recent[-1][0] - recent[0][0]) / 3600:.0f} h"
+                    f" &middot; about {hours:.0f} h to go" if hours < 72 else
+                    f"{rate:,.0f} markets an hour &middot; about {hours / 24:.1f} days to go")
+        else:
+            pace = "not moving in the last 6 h" if len(recent) > 1 else "measuring the pace"
+        bf = {"left": left, "pct": max(0.0, min(100.0, 100 * (1 - left / total))) if total else 0,
+              "pace": pace,
+              "chart": _lines_svg([("#2a6099", [c[1] for c in counts])], height=90)}
+    return {"chart": _bars_svg(budget, PROGRAM_COLOURS, limit=limit, shade=down),
+            "legend": PROGRAM_COLOURS, "down": any(down)}, _lines_svg(
+        [("#2a6099", behind)], unit=" s"), bf
 
 
 @app.route("/api-usage")
@@ -1733,40 +1899,69 @@ def api_usage():
         window = "24h"
     length, step, bucket_label = USAGE_WINDOWS[window]
     refresh = request.args.get("refresh") != "off"
+    end = int(time.time() // step * step)
+    starts = list(range(end - (length // step - 1) * step, end + step, step))
+    budget, behind_chart, bf = _monitor_charts(starts, step, length)
     page = dict(windows=list(USAGE_WINDOWS), window=window, refresh=refresh,
                 bucket_label=bucket_label, now=datetime.now(USAGE_TZ).strftime("%H:%M:%S"),
-                ms=_ms, size=_size, when=_when, c=_collection(), missing=False)
+                ms=_ms, size=_size, when=_when, c=_collection(), missing=False,
+                budget=budget, behind_chart=behind_chart, bf=bf,
+                first_label=_when(datetime.fromtimestamp(starts[0], timezone.utc)))
     if not db.query("SELECT to_regclass('api_requests') IS NOT NULL AS ok")[0]["ok"]:
         return render_template_string(USAGE_PAGE, **page, missing=True)
 
-    since = {"length": length}
+    since = {"length": length, "step": step}
     where = "r.at >= now() - make_interval(secs => %(length)s)"
     t = db.query(f"""
         SELECT count(*) AS n, count(*) FILTER (WHERE status >= 400) AS errors,
-               count(*) FILTER (WHERE status = 429) AS limited,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY ms) AS p50,
                percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95,
-               COALESCE(sum(bytes), 0) AS bytes, COALESCE(sum(row_count), 0) AS rows_sent,
-               count(*) FILTER (WHERE endpoint = '/v1/backfill' AND method = 'POST'
-                                AND status = 202) AS backfills
+               COALESCE(sum(bytes), 0) AS bytes, COALESCE(sum(row_count), 0) AS rows_sent
         FROM api_requests r WHERE {where}""", since)[0]
 
-    counts = {int(r["b"]): r for r in db.query(f"""
-        SELECT floor(EXTRACT(EPOCH FROM r.at) / %(step)s) * %(step)s AS b, count(*) AS n,
-               count(*) FILTER (WHERE status >= 400) AS e
-        FROM api_requests r WHERE {where} GROUP BY 1""", {**since, "step": step})}
-    end = int(time.time() // step * step)
-    starts = list(range(end - (length // step - 1) * step, end + step, step))
-    peak = max([counts[s]["n"] for s in starts if s in counts] or [0])
-    width = 1000 / len(starts)
-    bars = []
-    for i, s in enumerate(starts):
-        c = counts.get(s)
-        n, e = (c["n"], c["e"]) if c else (0, 0)
-        bars.append({"x": round(i * width, 2), "w": round(max(width - 1, 0.5), 2),
-                     "h": round(110 * n / peak, 1) if peak else 0,
-                     "eh": round(110 * e / peak, 1) if peak else 0, "n": n, "e": e,
-                     "label": _when(datetime.fromtimestamp(s, timezone.utc))})
+    # Requests per bucket by caller, and response times.
+    per = db.query(f"""
+        SELECT floor(EXTRACT(EPOCH FROM r.at) / %(step)s) * %(step)s AS b, k.name, r.user_agent,
+               count(*) AS n, count(*) FILTER (WHERE r.status >= 400) AS e
+        FROM api_requests r LEFT JOIN api_keys k USING (key_id)
+        WHERE {where} GROUP BY 1, 2, 3""", since)
+    totals = {}
+    for r in per:
+        who = _caller(r["name"], r["user_agent"])
+        totals[who] = totals.get(who, 0) + r["n"]
+    named = sorted(totals, key=totals.get, reverse=True)[:5]
+    legend = list(zip(named, CALLER_COLOURS))
+    if len(totals) > 5:
+        legend.append(("others", CALLER_COLOURS[5]))
+    buckets = {s: {} for s in starts}
+    errors = {s: 0 for s in starts}
+    for r in per:
+        s = int(r["b"])
+        if s not in buckets:
+            continue
+        who = _caller(r["name"], r["user_agent"])
+        who = who if who in named else "others"
+        buckets[s][who] = buckets[s].get(who, 0) + r["n"]
+        errors[s] += r["e"]
+    calls = {"chart": _bars_svg([buckets[s] for s in starts], legend,
+                                marks=[errors[s] > 0 for s in starts]), "legend": legend}
+    speed = {int(r["b"]): r for r in db.query(f"""
+        SELECT floor(EXTRACT(EPOCH FROM r.at) / %(step)s) * %(step)s AS b,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ms) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95
+        FROM api_requests r WHERE {where} GROUP BY 1""", since)}
+    speed_chart = _lines_svg([("#2a6099", [speed[s]["p50"] if s in speed else None for s in starts]),
+                              ("#e07b39", [speed[s]["p95"] if s in speed else None for s in starts])],
+                             unit=" ms")
+
+    tickers = db.query(f"""
+        SELECT tk AS t, count(*) AS n FROM api_requests r, unnest(r.tickers) AS tk
+        WHERE {where} GROUP BY tk ORDER BY n DESC LIMIT 12""", since)
+    most = max([r["n"] for r in tickers] or [1])
+    tickers = [dict(r, pct=round(100 * r["n"] / most)) for r in tickers]
+    jobs = [dict(j, pct=100 if j["status"] == "done" else
+                 round(100 * j["requests_done"] / j["requests_total"]) if j["requests_total"] else 0)
+            for j in db.query("SELECT * FROM api_jobs ORDER BY job_id DESC LIMIT 12")]
 
     callers = db.query(f"""
         SELECT COALESCE(k.name, '(no valid key)') AS name, r.user_agent, r.client_ip,
@@ -1780,23 +1975,17 @@ def api_usage():
                percentile_cont(0.95) WITHIN GROUP (ORDER BY r.ms) AS p95,
                COALESCE(sum(r.row_count), 0) AS rows_sent, COALESCE(sum(r.bytes), 0) AS bytes
         FROM api_requests r WHERE {where} GROUP BY 1, 2 ORDER BY n DESC LIMIT 25""", since)
-    tickers = db.query(f"""
-        SELECT tk AS t, count(*) AS n, max(r.at) AS last
-        FROM api_requests r, unnest(r.tickers) AS tk
-        WHERE {where} GROUP BY tk ORDER BY n DESC LIMIT 20""", since)
     recent = db.query("""
         SELECT r.*, k.name FROM api_requests r LEFT JOIN api_keys k USING (key_id)
         ORDER BY r.at DESC LIMIT 50""")
-    errors = db.query(f"""
+    errs = db.query(f"""
         SELECT r.* FROM api_requests r WHERE {where} AND r.status >= 400
         ORDER BY r.at DESC LIMIT 20""", since)
-    for r in recent + errors:
+    for r in recent + errs:
         r["query"] = _query(r["params"])
-    jobs = db.query("SELECT * FROM api_jobs ORDER BY job_id DESC LIMIT 15")
     return render_template_string(
-        USAGE_PAGE, **page, t=t, bars=bars, peak=peak, callers=callers, endpoints=endpoints,
-        tickers=tickers, recent=recent, errors=errors, jobs=jobs,
-        first_label=_when(datetime.fromtimestamp(starts[0], timezone.utc)))
+        USAGE_PAGE, **page, t=t, calls=calls, speed_chart=speed_chart, tickers=tickers,
+        jobs=jobs, callers=callers, endpoints=endpoints, recent=recent, errors=errs)
 
 
 @app.route("/stats")
@@ -2830,6 +3019,9 @@ if __name__ == "__main__":
     # Downloads started from the page share the Kalshi budget below live's hot
     # markets and above backfill.
     ratelimit.DEFAULT = "warm"
+    # The minute-by-minute record behind /api-usage's charts (monitor.py).
+    threading.Thread(target=monitor.run, args=(threading.Event(),), daemon=True,
+                     name="monitor").start()
 
     print(f"http://127.0.0.1:{args.port}")
     app.run(host=args.host, port=args.port, threaded=True)

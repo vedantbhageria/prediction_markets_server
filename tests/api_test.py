@@ -547,7 +547,7 @@ def test_usage(keys, ticker):
     for w in ("1h", "7d", "30d"):
         r = requests.get(f"http://127.0.0.1:{VIEWER_PORT}/api-usage?window={w}&refresh=off",
                          timeout=30)
-        check(r.status_code == 200 and "Requests over time" in r.text, f"10 /api-usage?window={w}")
+        check(r.status_code == 200 and "Kalshi request budget" in r.text, f"10 /api-usage?window={w}")
     stop("viewer")
     say("request records and the usage page checked")
 
