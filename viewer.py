@@ -2086,11 +2086,13 @@ def closing_near(name, ident, hours=1, same_category=True, by="time",
     if "price" in wants:
         if a["last"] is None:
             return dict(_near_result(a, same_category, by, hours, points), rows=[])
-        # The listing's price narrows the field; the exact test is below,
-        # on the newer price where there is one.
+        # The listing's price narrows the field, with room for it to be one
+        # scan behind; the exact test is below, on the newer price where
+        # there is one. A market with no listing price goes on to that test.
         where_k += ["m.close_time > now()",
-                    "abs(NULLIF(m.raw->>'last_price_dollars', '')::numeric - %s) <= %s"]
-        args_k += [a["last"], (points + 5) / 100]
+                    "(NULLIF(m.raw->>'last_price_dollars', '') IS NULL"
+                    " OR abs((m.raw->>'last_price_dollars')::numeric - %s) <= %s)"]
+        args_k += [a["last"], (points + 10) / 100]
         where_p.append("NOT COALESCE(p.closed, false)")
 
     pool = 600
