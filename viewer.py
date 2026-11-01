@@ -140,6 +140,7 @@ PAGE = """
  header .toggles button { font-size: 12px; padding: 3px 9px; margin-left: 6px;
    border: 1px solid #ccc; background: #f6f6f6; border-radius: 3px; cursor: pointer; }
  header .toggles button.off { opacity: .45; }
+ header .toggles button:disabled { opacity: .35; cursor: help; }
  .side { width: 250px; flex: none; border-right: 1px solid #ddd; padding-right: 12px;
          max-height: 78vh; overflow-y: auto; }
  .side b { display: block; font-size: 12px; text-transform: uppercase;
@@ -240,8 +241,10 @@ PAGE = """
   </span>
   <span class="toggles">
     <button type="button" onclick="panel('filters')">filters</button>
-    <button type="button" onclick="panel('nearby')">nearby</button>
-    <button type="button" onclick="panel('related')">related</button>
+    {% if near %}<button type="button" onclick="panel('nearby')">nearby</button>{% else
+    %}<button type="button" disabled title="open a market (click a ticker) to see markets near it">nearby</button>{% endif %}
+    {% if related %}<button type="button" onclick="panel('related')">related</button>{% else
+    %}<button type="button" disabled title="open a market (click a ticker) to see markets worded like it">related</button>{% endif %}
   </span>
 </header>
 <nav>
