@@ -7,6 +7,7 @@ Interactive docs are served at /docs.
 """
 
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -40,9 +41,13 @@ async def lifespan(app: FastAPI):
     worker.start()
     writer = usage.Writer()
     writer.start()
+    stop = threading.Event()
+    threading.Thread(target=v1.keep_categories_fresh, args=(stop,), daemon=True,
+                     name="categories").start()
     try:
         yield
     finally:
+        stop.set()
         worker.shutdown()
         writer.shutdown()
         db.close_pool()

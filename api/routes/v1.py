@@ -6,6 +6,7 @@ come out as ISO 8601 in UTC; a candle is stamped with the start of its bucket.
 """
 
 import json
+import logging
 import time
 from typing import Literal
 
@@ -20,6 +21,7 @@ from api.common import (ApiError, clean, iso, json_response, make_token, not_fou
                         split_list, table)
 
 router = APIRouter(prefix="/v1", dependencies=[Depends(require_key)])
+log = logging.getLogger("api")
 
 Format = Literal["json", "csv", "parquet"]
 FORMAT = Query("json", description="json, csv or parquet")
@@ -306,20 +308,42 @@ def series(series: str = Path(description="a series ticker, e.g. KXBTCD")):
     return json_response({**clean(row), **counts, "events": latest})
 
 
+# Counting 2.9 million markets takes seconds, so the counts are kept ready:
+# refreshed every CATEGORIES_EVERY seconds by keep_categories_fresh().
+CATEGORIES_EVERY = 600
 _categories = {"at": 0.0, "rows": None}
+
+
+def refresh_categories():
+    with read() as cur:
+        # Markets counted per event first, then per category: a third of the
+        # time of joining every market to its event.
+        cur.execute("""
+            SELECT e.category, count(DISTINCT e.series_ticker) AS series_count,
+                   count(*) AS event_count, sum(c.n)::bigint AS market_count,
+                   sum(c.open)::bigint AS open_market_count
+            FROM kalshi_events e
+            JOIN (SELECT event_ticker, count(*) AS n,
+                         count(*) FILTER (WHERE close_time > now()) AS open
+                  FROM kalshi_markets GROUP BY event_ticker) c USING (event_ticker)
+            GROUP BY e.category ORDER BY market_count DESC""")
+        _categories.update(at=time.time(), rows=[clean(r) for r in cur.fetchall()])
+
+
+def keep_categories_fresh(stop):
+    """Run in a thread for the life of the API."""
+    while not stop.is_set():
+        try:
+            refresh_categories()
+        except Exception as exc:
+            log.warning("could not count categories: %s: %s", type(exc).__name__, exc)
+        stop.wait(CATEGORIES_EVERY)
 
 
 @router.get("/categories", tags=["markets"], summary="Every category, with counts")
 def categories(format: Format = FORMAT):
-    if _categories["rows"] is None or time.time() - _categories["at"] > 600:
-        with read() as cur:
-            cur.execute("""
-                SELECT e.category, count(DISTINCT e.series_ticker) AS series_count,
-                       count(DISTINCT e.event_ticker) AS event_count, count(*) AS market_count,
-                       count(*) FILTER (WHERE m.close_time > now()) AS open_market_count
-                FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
-                GROUP BY e.category ORDER BY market_count DESC""")
-            _categories.update(at=time.time(), rows=[clean(r) for r in cur.fetchall()])
+    if _categories["rows"] is None:         # only before the first refresh finishes
+        refresh_categories()
     return table(_categories["rows"], ["category", "series_count", "event_count",
                                        "market_count", "open_market_count"], format,
                  key="categories")

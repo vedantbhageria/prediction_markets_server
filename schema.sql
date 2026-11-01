@@ -219,6 +219,10 @@ CREATE INDEX IF NOT EXISTS poly_candles_ts_idx ON poly_candles (ts);
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS kalshi_markets_title_trgm_idx
     ON kalshi_markets USING gin (title gin_trgm_ops);
+-- The API's q= also matches a ticker prefix; without this that half reads
+-- the whole table.
+CREATE INDEX IF NOT EXISTS kalshi_markets_ticker_trgm_idx
+    ON kalshi_markets USING gin (ticker gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
     ON poly_markets USING gin (question gin_trgm_ops);
 
