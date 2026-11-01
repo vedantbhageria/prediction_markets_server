@@ -202,4 +202,11 @@ def prune(days):
                 cur.execute(sql, (cutoff,) if dated else None)
                 if cur.rowcount:
                     counts[label] = cur.rowcount
+            # Titles no market carries any more -- only worth looking for
+            # when markets went.
+            if counts.get("kalshi markets"):
+                cur.execute("DELETE FROM kalshi_titles t WHERE NOT EXISTS"
+                            " (SELECT 1 FROM kalshi_markets m WHERE m.title = t.title)")
+                if cur.rowcount:
+                    counts["kalshi titles"] = cur.rowcount
     return counts

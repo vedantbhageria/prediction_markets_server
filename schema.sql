@@ -223,6 +223,18 @@ CREATE INDEX IF NOT EXISTS kalshi_markets_title_trgm_idx
 -- the whole table.
 CREATE INDEX IF NOT EXISTS kalshi_markets_ticker_trgm_idx
     ON kalshi_markets USING gin (ticker gin_trgm_ops);
+
+-- Every distinct Kalshi market title, for the viewer's related-wording panel.
+-- A price ladder repeats one title across hundreds of markets, so there are a
+-- fifth as many titles as markets, and the GiST index walks straight to the
+-- nearest ones (ORDER BY title <-> ...) instead of scoring every candidate.
+-- discover.py adds titles as it writes markets; store.prune drops titles no
+-- market has any more. The hash index leads from a title back to its markets.
+CREATE TABLE IF NOT EXISTS kalshi_titles (title TEXT PRIMARY KEY);
+CREATE INDEX IF NOT EXISTS kalshi_titles_trgm_idx
+    ON kalshi_titles USING gist (title gist_trgm_ops);
+CREATE INDEX IF NOT EXISTS kalshi_markets_title_hash_idx
+    ON kalshi_markets USING hash (title);
 CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
     ON poly_markets USING gin (question gin_trgm_ops);
 
@@ -294,6 +306,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS api_jobs_open_idx ON api_jobs (ticker)
 -- ---------------------------------------------------------------------------
 -- Upgrades for databases made by an earlier version of this file.
 -- ---------------------------------------------------------------------------
+
+-- kalshi_titles is new: fill it once from the markets already stored.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM kalshi_titles) AND EXISTS (SELECT 1 FROM kalshi_markets) THEN
+        INSERT INTO kalshi_titles SELECT DISTINCT title FROM kalshi_markets WHERE title IS NOT NULL;
+    END IF;
+END $$;
 
 -- Candles used to carry a `filled` flag for minutes with no trade. Only traded
 -- minutes are stored now. The rollups read the column, so they go first;

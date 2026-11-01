@@ -418,14 +418,7 @@ PAGE = """
   {% endif %}
   </div>
 
-{% if related_placeholder %}
-  <div class="related">
-    <b>related wording</b>
-    <div class="anchor">trigram similarity &middot; tune the bar</div>
-    <span class="meta">Not built yet on the new server &mdash; this panel will return once
-      title matching is set up.</span>
-  </div>
-{% elif related %}
+{% if related %}
   <div class="related">
     <b>related wording</b>
     <div class="anchor">trigram similarity &middot; tune the bar</div>
@@ -435,12 +428,14 @@ PAGE = """
       <span id="thrval">{{ (related.threshold * 100) | round | int }}%</span>
     </div>
     <div id="relrows">
+      {% if related.loading %}<span class="meta">loading&hellip;</span>{% else %}
       {% for m in related.rows %}
         <a href="{{ m.href }}" title="{{ m.title }}"><span class="venue {{ 'v-k' if m.venue == 'kalshi' else 'v-p' }}">{{ 'K' if m.venue == 'kalshi' else 'P' }}</span>{{ m.title[:70] }}{% if m.title|length > 70 %}&hellip;{% endif %}</a>
         <span class="meta"><b>{{ '%.2f'|format(m.score) }}</b>
           {% if m.got %}<span class="dot on" title="candles downloaded"></span>{% endif %}
           {{ m.closes or '' }}{% if m.shared %} &middot; {{ m.shared|join(', ') }}{% endif %}</span>
       {% else %}<span class="meta">nothing above this threshold</span>{% endfor %}
+      {% endif %}
     </div>
     <script>
     (function () {
@@ -463,70 +458,64 @@ PAGE = """
             (m.shared.length ? ' &middot; ' + esc(m.shared.join(', ')) : '') + '</span>';
         }).join('');
       }
+      function load() {
+        if (ctrl) ctrl.abort();            // drop the in-flight request
+        ctrl = new AbortController();
+        box.style.opacity = 0.5;
+        fetch('/related?table={{ table_name }}&ticker={{ selection|urlencode }}&t=' +
+              (slider.value / 100), {signal: ctrl.signal})
+          .then(function (r) { return r.json(); })
+          .then(function (d) { box.style.opacity = 1; draw(d.rows); })
+          .catch(function () {});
+      }
       slider.addEventListener('input', function () {
         label.textContent = slider.value + '%';
         clearTimeout(timer);
-        timer = setTimeout(function () {
-          if (ctrl) ctrl.abort();          // drop the in-flight request
-          ctrl = new AbortController();
-          box.style.opacity = 0.5;
-          fetch('/related?table={{ table_name }}&ticker={{ selection }}&t=' +
-                (slider.value / 100), {signal: ctrl.signal})
-            .then(function (r) { return r.json(); })
-            .then(function (d) { box.style.opacity = 1; draw(d.rows); })
-            .catch(function () {});
-        }, 200);
+        timer = setTimeout(load, 200);
       });
+      load();                              // the page does not wait for it
     })();
     </script>
   </div>
 {% endif %}
-{% if near_placeholder %}
-  <div class="nearby">
-    <b>nearby markets</b>
-    <div class="anchor">same expiry, strike or odds</div>
-    <span class="meta">Not built yet on the new server &mdash; this panel will return once
-      strikes and live prices are in the database.</span>
-  </div>
-{% elif near %}
+{% if near %}
   <div class="nearby">
     <b>nearby markets</b>
     <div class="anchor" id="nearhead">
+      {% if near.loading %}same expiry or odds{% else %}
       {{ near.kalshi_n }} Kalshi, {{ near.poly_n }} Polymarket
       {% if near.same_category and near.category %}&middot; {{ near.category }}{% endif %}<br>
       {% if 'time' in near.by %}expires {{ near.when }} &plusmn;{{ near.hours }}h{% endif %}
-      {% if 'strike' in near.by and near.anchor_strike %}
-        &middot; strike ${{ '{:,.0f}'.format(near.anchor_strike) }} &plusmn;{{ near.pct }}%{% endif %}
       {% if 'price' in near.by and near.anchor_last is not none %}
         &middot; odds {{ '%.0f'|format(near.anchor_last * 100) }}% &plusmn;{{ near.points }}pt{% endif %}
+      {% endif %}
     </div>
 
     <div class="byrow">
-      {% for b, label in [('time', 'same expiry'), ('strike', 'same strike'),
-                          ('price', 'same odds'),
-                          ('strike,time', 'expiry + strike'),
+      {% for b, label in [('time', 'same expiry'), ('price', 'same odds'),
                           ('price,time', 'expiry + odds')] %}
-        <a class="nctl" data-qs="by={{ b }}&near={{ near.hours }}&pct={{ near.pct }}&pts={{ near.points }}&cat={{ '1' if near.same_category else '0' }}"
+        <a class="nctl" data-qs="by={{ b }}&near={{ near.hours }}&pts={{ near.points }}&cat={{ '1' if near.same_category else '0' }}"
            " class="nctl {{ 'on' if b == near.by else '' }}">{{ label }}</a>
       {% endfor %}
     </div>
 
     <div id="nearrows">
+    {% if near.loading %}<span class="meta">loading&hellip;</span>{% else %}
     {% for m in near.rows %}
       <a href="{{ m.href }}"><span class="venue {{ 'v-k' if m.venue == 'Kalshi' else 'v-p' }}">{{ m.venue[0] }}</span>{{ m.title }}{% if m.last is not none %} <b>{{ '%.0f'|format(m.last * 100) }}%</b>{% endif %}</a>
-      <span class="meta">{{ m.close }}{% if m.strike %} &middot; ${{ '{:,.0f}'.format(m.strike) }}{% endif %}
-        &middot; vol {{ '{:,.0f}'.format(m.volume or 0) }}</span>
+      <span class="meta">{{ m.close }} &middot; vol {{ '{:,.0f}'.format(m.volume or 0) }}</span>
     {% else %}
       <span class="meta">nothing matches on this measure</span>
     {% endfor %}
+    {% endif %}
     </div>
     <script>
     (function () {
       var box = document.getElementById('nearrows');
       var head = document.getElementById('nearhead');
-      var base = 'table={{ table_name }}&ticker={{ selection }}';
+      var base = 'table={{ table_name }}&ticker={{ selection|urlencode }}';
       var state = {by: '{{ near.by }}', near: '{{ near.hours }}',
-                   pct: '{{ near.pct }}', pts: '{{ near.points }}',
+                   pts: '{{ near.points }}',
                    cat: '{{ '1' if near.same_category else '0' }}'};
       function esc(s) { return (s || '').replace(/[&<>"]/g, function (c) {
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
@@ -543,9 +532,26 @@ PAGE = """
             (m.venue === 'Kalshi' ? 'v-k">K' : 'v-p">P') + '</span>' +
             esc(m.title) + (m.last != null ? ' <b>' + Math.round(m.last * 100) + '%</b>' : '') +
             '</a><span class="meta">' + esc(m.close) +
-            (m.strike ? ' \u00b7 $' + Number(m.strike).toLocaleString() : '') +
             ' \u00b7 vol ' + Math.round(m.volume || 0).toLocaleString() + '</span>';
         }).join('');
+      }
+
+      function highlight() {
+        document.querySelectorAll('a.nctl').forEach(function (o) {
+          var q = o.dataset.qs || '';
+          var on = q.split('&').every(function (kv) {
+            var p = kv.split('='); return !p[0] || state[p[0]] === p[1];
+          });
+          o.classList.toggle('on', on);
+        });
+      }
+      function load() {
+        box.style.opacity = 0.5;
+        var qs = base + '&by=' + state.by + '&near=' + state.near +
+                 '&pts=' + state.pts + '&cat=' + state.cat;
+        fetch('/nearby?' + qs).then(function (r) { return r.json(); })
+          .then(function (d) { box.style.opacity = 1; draw(d); })
+          .catch(function () { box.style.opacity = 1; });
       }
 
       document.querySelectorAll('a.nctl').forEach(function (a) {
@@ -554,46 +560,31 @@ PAGE = """
           (a.dataset.qs || '').split('&').forEach(function (kv) {
             var p = kv.split('='); if (p[0]) state[p[0]] = p[1];
           });
-          document.querySelectorAll('a.nctl').forEach(function (o) {
-            var q = o.dataset.qs || '';
-            var on = q.split('&').every(function (kv) {
-              var p = kv.split('='); return !p[0] || state[p[0]] === p[1];
-            });
-            o.classList.toggle('on', on);
-          });
-          box.style.opacity = 0.5;
-          var qs = base + '&by=' + state.by + '&near=' + state.near +
-                   '&pct=' + state.pct + '&pts=' + state.pts + '&cat=' + state.cat;
-          fetch('/nearby?' + qs).then(function (r) { return r.json(); })
-            .then(function (d) { box.style.opacity = 1; draw(d); })
-            .catch(function () { box.style.opacity = 1; });
+          highlight();
+          load();
         });
       });
+      highlight();
+      load();                                       // the page does not wait for it
     })();
     </script>
 
     <div class="widen">
       {% if 'time' in near.by %}
         {% for h in [1, 3, 6, 24] %}
-          <a class="nctl" data-qs="by={{ near.by }}&near={{ h }}&pct={{ near.pct }}&pts={{ near.points }}&cat={{ '1' if near.same_category else '0' }}"
+          <a class="nctl" data-qs="by={{ near.by }}&near={{ h }}&pts={{ near.points }}&cat={{ '1' if near.same_category else '0' }}"
              " class="nctl {{ 'on' if near.hours == h else '' }}">&plusmn;{{ h }}h</a>
         {% endfor %}<br>
       {% endif %}
       {% if 'price' in near.by %}
         {% for pt in [2, 5, 10, 20] %}
-          <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pct={{ near.pct }}&pts={{ pt }}&cat={{ '1' if near.same_category else '0' }}"
+          <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pts={{ pt }}&cat={{ '1' if near.same_category else '0' }}"
              " class="nctl {{ 'on' if near.points == pt else '' }}">&plusmn;{{ pt }}pt</a>
         {% endfor %}<br>
       {% endif %}
-      {% if 'strike' in near.by %}
-        {% for pc in [1, 2, 5, 10] %}
-          <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pct={{ pc }}&pts={{ near.points }}&cat={{ '1' if near.same_category else '0' }}"
-             " class="nctl {{ 'on' if near.pct == pc else '' }}">&plusmn;{{ pc }}%</a>
-        {% endfor %}<br>
-      {% endif %}
-      <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pct={{ near.pct }}&pts={{ near.points }}&cat=1"
+      <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pts={{ near.points }}&cat=1"
          " class="nctl {{ 'on' if near.same_category else '' }}">this category</a>
-      <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pct={{ near.pct }}&pts={{ near.points }}&cat=0"
+      <a class="nctl" data-qs="by={{ near.by }}&near={{ near.hours }}&pts={{ near.points }}&cat=0"
          " class="nctl {{ '' if near.same_category else 'on' }}">all categories</a>
     </div>
   </div>
@@ -633,7 +624,7 @@ def render(**kwargs):
     base = dict(groups=table_groups(), rows=None, cols=[], sql=None, error=None,
                 panels=[], selection=None, table_name=None, candle_table=None,
                 detail=None, near=None, related=None, msg=None, fetchable=False, dim="",
-                related_placeholder=False, near_placeholder=False,
+
                 asset_value="", ticker_value="", job=None, raw_doc=None, q="", limit=200,
                 table_more=False, table_qs="",
                 fetch_estimate=None)
@@ -1894,6 +1885,9 @@ def build_panels(name, value, ticker, dim="", limit=200):
     return panels
 
 
+NEAREST_TITLES = 60        # distinct titles fetched before the threshold is applied
+
+
 def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
     """Markets whose wording resembles this one, on either venue.
 
@@ -1904,7 +1898,10 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
     differently about the same event may only score 0.2.
 
     Titles are deduplicated -- a Kalshi day-ladder has hundreds of markets with
-    one title, and listing them all would bury anything genuinely related.
+    one title, and listing them all would bury anything genuinely related. On
+    Kalshi that is done by matching kalshi_titles, one row per distinct title,
+    nearest first through its GiST index, and then taking each title's busiest
+    market: well under a second, where scoring every market took seconds.
     """
     if name in POLY:
         anchor = db.query("SELECT question AS t FROM poly_markets"
@@ -1915,51 +1912,52 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
         return None
     text = anchor[0]["t"]
 
-    parts, args = [], []
-    if same_venue or name in POLY:
-        parts.append("""
-            SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
-                   m.title, e.category, m.volume,
-                   similarity(m.title, %s) AS score,
-                   to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
-                   EXISTS (SELECT 1 FROM kalshi_candles c
-                           WHERE c.ticker = m.ticker) AS got
-            FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
-            WHERE m.title %% %s AND m.ticker <> %s
-            ORDER BY m.title, m.volume DESC NULLS LAST""")
-        args += [text, text, ident]
-    if same_venue or name not in POLY:
-        parts.append("""
-            SELECT DISTINCT ON (p.question) 'poly' AS venue, p.condition_id AS id,
-                   p.question AS title, e.category, p.volume,
-                   similarity(p.question, %s) AS score,
-                   to_char(p.end_date, 'YYYY-MM-DD HH24:MI') AS closes,
-                   EXISTS (SELECT 1 FROM poly_candles c
-                           WHERE c.condition_id = p.condition_id) AS got
-            FROM poly_markets p LEFT JOIN poly_events e USING (event_id)
-            WHERE p.question %% %s AND p.condition_id <> %s
-            ORDER BY p.question, p.volume DESC NULLS LAST""")
-        args += [text, text, ident]
-
-    sql = " UNION ALL ".join(f"({s})" for s in parts)
-    args += [threshold, max(6, limit // 2)]
     # Rank within each venue before merging. A global top-N fills up with
     # Kalshi ladder siblings (they score 0.7-1.0 against each other) and the
     # Polymarket market asking the same question -- which scores ~0.4 because
     # it is worded differently -- never makes the cut.
-    full = (f"SELECT * FROM (SELECT *, row_number() OVER"
-            " (PARTITION BY venue ORDER BY score DESC, volume DESC NULLS LAST) rn"
-            f" FROM ({sql}) y WHERE score >= %s) x"
-            " WHERE rn <= %s ORDER BY venue, score DESC")
-
-    # The % operator filters at pg_trgm's own similarity_threshold (0.3 by
-    # default), so a slider set lower than that would silently do nothing.
-    # Set it for this transaction so the index and the slider agree.
+    per = max(6, limit // 2)
+    args = {"t": text, "id": ident, "thr": threshold, "pool": NEAREST_TITLES, "per": per}
+    rows = []
     with connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SET LOCAL pg_trgm.similarity_threshold = %s", (threshold,))
-            cur.execute(full, tuple(args))
-            rows = cur.fetchall()
+            if same_venue or name in POLY:
+                cur.execute("""
+                    WITH near AS (
+                        SELECT title, similarity(title, %(t)s) AS score FROM kalshi_titles
+                        ORDER BY title <-> %(t)s LIMIT %(pool)s)
+                    SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
+                           m.title, e.category, m.volume, n.score,
+                           to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
+                           EXISTS (SELECT 1 FROM kalshi_candles c
+                                   WHERE c.ticker = m.ticker) AS got
+                    FROM near n
+                    JOIN kalshi_markets m ON m.title = n.title
+                    JOIN kalshi_events e USING (event_ticker)
+                    WHERE n.score >= %(thr)s AND m.ticker <> %(id)s
+                    ORDER BY m.title, m.volume DESC NULLS LAST""", args)
+                found = sorted(cur.fetchall(),
+                               key=lambda r: (-r["score"], -float(r["volume"] or 0)))
+                rows += found[:per]
+            if same_venue or name not in POLY:
+                # The % operator filters at pg_trgm's own similarity_threshold
+                # (0.3 by default), so a slider set lower than that would
+                # silently do nothing. Set it so the index and the slider agree.
+                cur.execute("SET LOCAL pg_trgm.similarity_threshold = %s", (threshold,))
+                cur.execute("""
+                    SELECT * FROM (
+                        SELECT DISTINCT ON (p.question) 'poly' AS venue, p.condition_id AS id,
+                               p.question AS title, e.category, p.volume,
+                               similarity(p.question, %(t)s) AS score,
+                               to_char(p.end_date, 'YYYY-MM-DD HH24:MI') AS closes,
+                               EXISTS (SELECT 1 FROM poly_candles c
+                                       WHERE c.condition_id = p.condition_id) AS got
+                        FROM poly_markets p LEFT JOIN poly_events e USING (event_id)
+                        WHERE p.question %% %(t)s AND p.condition_id <> %(id)s
+                        ORDER BY p.question, p.volume DESC NULLS LAST) x
+                    WHERE score >= %(thr)s
+                    ORDER BY score DESC, volume DESC NULLS LAST LIMIT %(per)s""", args)
+                rows += cur.fetchall()
 
     # Show which words drove the match, so a low score is interpretable.
     stop = {"the","a","an","will","be","by","on","in","at","to","of","and","or",
@@ -1979,10 +1977,6 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
 
 @app.route("/nearby")
 def nearby_feed():
-    return jsonify({"rows": [], "kalshi_n": 0, "poly_n": 0, "placeholder": True})
-
-
-def _nearby_feed_later():
     """Nearby-market list for the current settings.
 
     Exists so changing a tolerance does not reload the page -- on a market with
@@ -1996,7 +1990,6 @@ def _nearby_feed_later():
                             hours=float(request.args.get("near", 1)),
                             same_category=request.args.get("cat", "1") != "0",
                             by=request.args.get("by", "time"),
-                            pct=float(request.args.get("pct", 2)),
                             points=float(request.args.get("pts", 5)))
     except ValueError:
         data = None
@@ -2004,19 +1997,15 @@ def _nearby_feed_later():
         return jsonify({"rows": [], "kalshi_n": 0, "poly_n": 0})
     return jsonify({
         "rows": data["rows"], "kalshi_n": data["kalshi_n"], "poly_n": data["poly_n"],
-        "by": data["by"], "hours": data["hours"], "pct": data["pct"],
+        "by": data["by"], "hours": data["hours"],
         "points": data["points"], "when": data["when"],
         "category": data["category"] if data["same_category"] else None,
-        "anchor_last": data["anchor_last"], "anchor_strike": data["anchor_strike"],
+        "anchor_last": data["anchor_last"],
     })
 
 
 @app.route("/related")
 def related_feed():
-    return jsonify({"rows": [], "placeholder": True})
-
-
-def _related_feed_later():
     """Related-market list at a given threshold, re-fetched as the slider moves."""
     name = request.args.get("table", "kalshi_candles")
     ident = request.args.get("ticker", "")
@@ -2030,115 +2019,135 @@ def _related_feed_later():
     return jsonify({"threshold": threshold, "rows": data["rows"]})
 
 
+# A market's price is its last trade, worked out when asked: the newest
+# candle if it is at least as new as the listing discovery last read, else the
+# last price in that listing (Kalshi's own, up to one scan old). `lc` is the
+# newest candle, `t` the market's tracking row.
+LAST_PRICE = """CASE WHEN lc.ts IS NOT NULL AND (t.volume_measured_at IS NULL
+                         OR lc.ts >= t.volume_measured_at - interval '1 minute')
+                    THEN lc.close
+                    ELSE COALESCE(NULLIF(m.raw->>'last_price_dollars', '')::numeric, lc.close)
+               END"""
+NEWEST_CANDLE = """LEFT JOIN LATERAL (SELECT c.ts, c.close FROM kalshi_candles c
+                                    WHERE c.ticker = m.ticker
+                                    ORDER BY c.ts DESC LIMIT 1) lc ON true"""
+
+
 def closing_near(name, ident, hours=1, same_category=True, by="time",
-                 pct=2.0, points=5.0, limit=40):
+                 points=5.0, limit=40):
     """Markets near this one, by whichever measure you pick.
 
     by = time    resolve within `hours` of each other
-         strike  ask about a price within `pct`% of the same level
-         price   currently trade within `points` percentage points
-    Combine with "+", e.g. "time+price". Restricted to the anchor's category
+         price   currently trade within `points` percentage points -- among
+                 markets still open, since a closed market's price is final
+    Combine with ",", e.g. "price,time". Restricted to the anchor's category
     by default -- a coincidence in an unrelated sector is not a comparison.
     """
     if name in POLY:
         anchor = db.query(
             "SELECT COALESCE(p.stated_date::timestamptz, p.end_date) AS t,"
-            " p.question AS title, e.category, p.strike,"
+            " p.question AS title, e.category,"
             " (SELECT c.close FROM poly_candles c WHERE c.condition_id = p.condition_id"
             "   ORDER BY c.ts DESC LIMIT 1) AS last"
             " FROM poly_markets p LEFT JOIN poly_events e USING (event_id)"
             " WHERE p.condition_id = %s", (ident,))
     else:
-        anchor = db.query(
-            "SELECT m.close_time AS t, m.title, e.category, m.strike,"
-            " (SELECT c.close FROM kalshi_candles c WHERE c.ticker = m.ticker"
-            "   ORDER BY c.ts DESC LIMIT 1) AS last"
-            " FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)"
-            " WHERE m.ticker = %s", (ident,))
+        anchor = db.query(f"""
+            SELECT m.close_time AS t, m.title, e.category, {LAST_PRICE} AS last
+            FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
+            LEFT JOIN kalshi_tracking t USING (ticker)
+            {NEWEST_CANDLE}
+            WHERE m.ticker = %s""", (ident,))
     if not anchor:
         return None
 
     a = anchor[0]
     # "+" in a query string decodes to a space, so the separator is a comma;
-    # accept either so old links keep working.
-    wants = {w for w in by.replace("+", ",").replace(" ", ",").split(",") if w}
-    by = ",".join(sorted(wants))
+    # accept either so old links keep working. Strike is no longer offered.
+    wants = {w for w in by.replace("+", ",").replace(" ", ",").split(",")
+             if w in ("time", "price")} or {"time"}
+    by = ",".join(sorted(wants, key=lambda w: w != "price"))
     category = a["category"] if same_category else None
 
     # Narrow in SQL where a cheap index exists; the rest is filtered below.
-    cat_k = " AND e.category = %s" if category else ""
-    cat_p = " AND e.category = %s" if category else ""
-    time_k = time_p = ""
-    args_t = ()
+    where_k, args_k = ["true"], []
+    where_p, args_p = ["true"], []
+    if category:
+        where_k.append("e.category = %s")
+        where_p.append("e.category = %s")
+        args_k.append(category)
+        args_p.append(category)
     if "time" in wants and a["t"]:
         span = timedelta(hours=hours)
-        time_k = " AND m.close_time BETWEEN %s AND %s"
-        time_p = (" AND COALESCE(p.stated_date::timestamptz, p.end_date)"
-                  " BETWEEN %s AND %s")
-        args_t = (a["t"] - span, a["t"] + span)
+        where_k.append("m.close_time BETWEEN %s AND %s")
+        where_p.append("COALESCE(p.stated_date::timestamptz, p.end_date) BETWEEN %s AND %s")
+        args_k += [a["t"] - span, a["t"] + span]
+        args_p += [a["t"] - span, a["t"] + span]
+    if "price" in wants:
+        if a["last"] is None:
+            return dict(_near_result(a, same_category, by, hours, points), rows=[])
+        # The listing's price narrows the field; the exact test is below,
+        # on the newer price where there is one.
+        where_k += ["m.close_time > now()",
+                    "abs(NULLIF(m.raw->>'last_price_dollars', '')::numeric - %s) <= %s"]
+        args_k += [a["last"], (points + 5) / 100]
+        where_p.append("NOT COALESCE(p.closed, false)")
 
     pool = 600
     kalshi = db.query(f"""
-        SELECT m.ticker AS id, COALESCE(m.raw->>'yes_sub_title', m.title) AS title,
-               e.category, m.close_time AS close, m.volume, m.strike, 'Kalshi' AS venue,
-               (SELECT c.close FROM kalshi_candles c WHERE c.ticker = m.ticker
-                 ORDER BY c.ts DESC LIMIT 1) AS last
-        FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
-        WHERE true{cat_k}{time_k}
-        ORDER BY m.volume DESC NULLS LAST LIMIT {pool}""",
-        ((category,) if category else ()) + args_t)
+        SELECT x.id, x.title, x.category, x.close, x.volume, 'Kalshi' AS venue,
+               {LAST_PRICE.replace("m.raw->>'last_price_dollars'", "x.listed")} AS last
+        FROM (SELECT m.ticker AS id, COALESCE(m.raw->>'yes_sub_title', m.title) AS title,
+                     e.category, m.close_time AS close, m.volume,
+                     m.raw->>'last_price_dollars' AS listed
+              FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
+              WHERE {' AND '.join(where_k)}
+              ORDER BY m.volume DESC NULLS LAST LIMIT {pool}) x
+        LEFT JOIN kalshi_tracking t ON t.ticker = x.id
+        LEFT JOIN LATERAL (SELECT c.ts, c.close FROM kalshi_candles c
+                           WHERE c.ticker = x.id ORDER BY c.ts DESC LIMIT 1) lc ON true""",
+        tuple(args_k))
 
     poly = db.query(f"""
         SELECT p.condition_id AS id, p.question AS title, e.category,
                COALESCE(p.stated_date::timestamptz, p.end_date) AS close,
-               p.volume, p.strike, 'Polymarket' AS venue,
+               p.volume, 'Polymarket' AS venue,
                (SELECT c.close FROM poly_candles c WHERE c.condition_id = p.condition_id
                  ORDER BY c.ts DESC LIMIT 1) AS last
         FROM poly_markets p LEFT JOIN poly_events e USING (event_id)
-        WHERE true{cat_p}{time_p}
-        ORDER BY p.volume DESC NULLS LAST LIMIT {pool}""",
-        ((category,) if category else ()) + args_t)
+        WHERE {' AND '.join(where_p)}
+        ORDER BY p.volume DESC NULLS LAST LIMIT {pool}""", tuple(args_p))
 
     rows = []
     for r in list(kalshi) + list(poly):
         if r["id"] == ident:
             continue
         gap = abs((r["close"] - a["t"]).total_seconds()) if (r["close"] and a["t"]) else None
-
-        if "strike" in wants:
-            if not (r["strike"] and a["strike"]):
-                continue
-            if abs(float(r["strike"]) - float(a["strike"])) > pct / 100 * float(a["strike"]):
-                continue
         if "price" in wants:
-            if r["last"] is None or a["last"] is None:
+            if r["last"] is None:
                 continue
             if abs(float(r["last"]) - float(a["last"])) * 100 > points:
                 continue
-
         href = ("/table/poly_candles?ticker=" if r["venue"] == "Polymarket"
                 else "/table/kalshi_candles?ticker=") + r["id"]
-        rows.append(dict(r, close=str(r["close"])[:16], href=href, gap=gap or 0))
+        rows.append(dict(r, close=str(r["close"])[:16], href=href, gap=gap or 0,
+                         last=float(r["last"]) if r["last"] is not None else None))
 
     # Sort by whichever measure was asked for.
-    if "price" in wants and a["last"] is not None:
-        rows.sort(key=lambda r: (abs(float(r["last"]) - float(a["last"])), -(float(r["volume"] or 0))))
-    elif "strike" in wants and a["strike"]:
-        rows.sort(key=lambda r: (abs(float(r["strike"]) - float(a["strike"])), -(float(r["volume"] or 0))))
+    if "price" in wants:
+        rows.sort(key=lambda r: (abs(r["last"] - float(a["last"])), -(float(r["volume"] or 0))))
     else:
         rows.sort(key=lambda r: (r["gap"], -(float(r["volume"] or 0))))
+    return dict(_near_result(a, same_category, by, hours, points), rows=rows[:limit],
+                kalshi_n=sum(1 for r in rows if r["venue"] == "Kalshi"),
+                poly_n=sum(1 for r in rows if r["venue"] == "Polymarket"))
 
-    return {
-        "anchor": a["title"], "category": a["category"],
-        "same_category": same_category, "by": by, "hours": hours,
-        "pct": pct, "points": points,
-        "anchor_last": float(a["last"]) if a["last"] is not None else None,
-        "anchor_strike": float(a["strike"]) if a["strike"] is not None else None,
-        "when": str(a["t"])[:16],
-        "rows": rows[:limit],
-        "kalshi_n": sum(1 for r in rows if r["venue"] == "Kalshi"),
-        "poly_n": sum(1 for r in rows if r["venue"] == "Polymarket"),
-    }
+
+def _near_result(a, same_category, by, hours, points):
+    return {"anchor": a["title"], "category": a["category"],
+            "same_category": same_category, "by": by, "hours": hours, "points": points,
+            "anchor_last": float(a["last"]) if a["last"] is not None else None,
+            "when": str(a["t"])[:16], "rows": [], "kalshi_n": 0, "poly_n": 0}
 
 
 def fetch_candles(name, ident):
@@ -2400,12 +2409,13 @@ def table(name):
             detail["live"] = detail["live"] and not detail.get("is_closed")
         detail["closes_in"] = _human_delta(close - datetime.now(close.tzinfo))             if detail["live"] else None
 
-    # Related wording and nearby markets are placeholders on the new server
-    # until title matching and derived columns (strike, live price) exist.
-    # related_markets() / closing_near() are kept for when they come back.
+    # Related wording and nearby markets fill themselves in from /related and
+    # /nearby once the page is up, so the page never waits for them.
     near = related = None
-    market_page = bool(ticker) and name in ("kalshi_markets", "poly_markets",
-                                            "kalshi_candles", "poly_candles")
+    if ticker and name in ("kalshi_markets", "poly_markets", "kalshi_candles", "poly_candles"):
+        related = {"threshold": 0.25, "rows": [], "loading": True}
+        near = {"by": "time", "hours": 1, "points": 5, "same_category": True,
+                "loading": True, "rows": []}
 
     # Offer a download when a single market is open and has nothing stored.
     fetchable = bool(ticker) and name.endswith("_candles") and not rows
@@ -2449,8 +2459,7 @@ def table(name):
                   panels=build_panels(name, asset, ticker, dim),
                   selection=ticker or asset, table_name=name,
                   candle_table=candle_table, detail=detail, near=near,
-                  related=related, related_placeholder=market_page,
-                  near_placeholder=market_page,
+                  related=related,
                   msg=request.args.get("msg"), fetchable=fetchable, job=job,
                   fetch_estimate=fetch_estimate,
                   q=q, limit=cap, table_more=table_more, table_qs=table_qs,

@@ -39,6 +39,7 @@ MARKET_COLS = ["ticker", "event_ticker", "title", "status", "result", "open_time
                "close_time", "strike_type", "floor_strike", "cap_strike",
                "volume", "open_interest", "raw"]
 MARKET_WATCH = ["status", "result", "volume", "open_interest", "close_time", "title"]
+TITLE = MARKET_COLS.index("title")
 
 POLY_EVENT_COLS = ["event_id", "slug", "title", "tags"]
 POLY_EVENT_WATCH = ["slug", "title", "tags"]
@@ -134,6 +135,11 @@ def _write_kalshi(events, markets, scan=None, asked=None, answered=None):
             store.upsert(cur, "kalshi_events", EVENT_COLS, events, "event_ticker", EVENT_WATCH)
             written = store.upsert(cur, "kalshi_markets", MARKET_COLS, markets,
                                    "ticker", MARKET_WATCH)
+            # The viewer's related-wording panel matches distinct titles.
+            titles = sorted({m[TITLE] for m in markets if m[TITLE]})
+            if titles:
+                cur.execute("INSERT INTO kalshi_titles SELECT unnest(%s::text[])"
+                            " ON CONFLICT DO NOTHING", (titles,))
             _observe(cur, markets, scan, asked, answered)
             return written
 
