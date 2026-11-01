@@ -228,7 +228,7 @@
     <div class="item"><h3>activity.py <span class="pill">after each scan</span></h3><p>Turns each scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
     <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
     <div class="item"><h3>backfill.py <span class="pill warm">running</span></h3><p>Fills old history on leftover budget, reports coverage, checks candles against volumes, repairs.</p></div>
-    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login, with related-wording and nearby-market panels; <code>/api-usage</code> shows API use.</p></div>
+    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login, with related-wording and nearby-market panels; <code>/api-usage</code> charts API use, the budget and the backfill.</p></div>
     <div class="item"><h3>api/ <span class="pill">always on</span></h3><p>The data API for Python: markets, candles, and backfill on demand — see the API tab.</p></div>
   </div>
 </section>
@@ -449,6 +449,7 @@
       <tr><td>Intervals from 1-minute rows</td><td>Always matches what is stored, even right after a backfill; the rollups can lag 30 min.</td></tr>
       <tr><td>Nearby: expiry and odds only</td><td>A strike depends on how a title is worded; expiry and price do not.</td></tr>
       <tr><td>Prices worked out when read</td><td>Newest candle if newer than the listing, else the listing's last price — nothing extra stored.</td></tr>
+      <tr><td>Usage history in plain files</td><td>One JSON line a minute (~100 bytes) in <code>data/state/monitor/</code>, apart from the database.</td></tr>
       <tr><td>Related wording over distinct titles</td><td>Nearest titles first, then each one's busiest market: 0.5 s instead of 6 s.</td></tr>
     </table>
   </div>
@@ -695,7 +696,7 @@ GET /v1/backfill/17
       <div class="item"><h3>10 backfills a minute <span class="pill">per key</span></h3><p>Each one costs Kalshi requests, so they are capped on their own.</p></div>
       <div class="item"><h3>Keys stored hashed</h3><p>A stolen table opens nothing; a revoked key stops within a minute.</p></div>
       <div class="item"><h3>No way through to Kalshi</h3><p>Only backfill jobs reach it, on their own line of the shared budget.</p></div>
-      <div class="item"><h3>Usage page <span class="pill ok">viewer</span></h3><p>Every request is recorded for 30 days; <code>/api-usage</code> shows callers, markets, errors and jobs.</p></div>
+      <div class="item"><h3>Usage page <span class="pill ok">viewer</span></h3><p><code>/api-usage</code> charts requests by caller, response times, the Kalshi budget, backfill progress and jobs.</p></div>
     </div>
   </div>
 </section>
@@ -711,6 +712,7 @@ GET /v1/backfill/17
     <li class="done">Forward fill<span>1m, 5m, 1h and 1d, whole-life and mid-life windows, matched to a fill of the truth.</span></li>
     <li class="done">Paging and formats<span>Small pages joined = one page; json = csv = parquet; 5 tickers together = each alone.</span></li>
     <li class="done">A crash mid-job<span>A second push refused while one runs; the API killed mid-job; the job finished after the restart.</span></li>
+    <li class="done">Usage charts<span>Minute files written, read across days, gaps refilled after a restart, old files deleted; every chart drawn.</span></li>
     <li class="done">Request records<span>Every request logged with key, status, rows and bytes; none lost while the table was away; usage page renders.</span></li>
   </ul>
 </section>
