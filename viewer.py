@@ -1886,6 +1886,29 @@ def build_panels(name, value, ticker, dim="", limit=200):
 
 
 NEAREST_TITLES = 60        # distinct titles fetched before the threshold is applied
+NEAREST_KEEP = 600         # seconds a title's nearest titles are remembered
+_nearest = {}              # title -> (fetched at, [(title, score)]), nearest first
+_nearest_lock = threading.Lock()
+
+
+def nearest_titles(text):
+    """The NEAREST_TITLES distinct Kalshi titles closest to `text`, with their
+    similarity. Finding them is the slow part (~0.4 s over half a million
+    titles) and does not depend on the slider, so they are remembered: moving
+    the slider then costs only the market lookup."""
+    now = time.monotonic()
+    with _nearest_lock:
+        hit = _nearest.get(text)
+    if hit and now - hit[0] < NEAREST_KEEP:
+        return hit[1]
+    rows = db.query("SELECT title, similarity(title, %s) AS score FROM kalshi_titles"
+                    " ORDER BY title <-> %s LIMIT %s", (text, text, NEAREST_TITLES))
+    found = [(r["title"], float(r["score"])) for r in rows]
+    with _nearest_lock:
+        if len(_nearest) > 2000:
+            _nearest.clear()
+        _nearest[text] = (now, found)
+    return found
 
 
 def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
@@ -1917,27 +1940,24 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
     # Polymarket market asking the same question -- which scores ~0.4 because
     # it is worded differently -- never makes the cut.
     per = max(6, limit // 2)
-    args = {"t": text, "id": ident, "thr": threshold, "pool": NEAREST_TITLES, "per": per}
+    args = {"t": text, "id": ident, "thr": threshold, "per": per}
     rows = []
     with connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if same_venue or name in POLY:
+                scores = {t: sc for t, sc in nearest_titles(text) if sc >= threshold}
                 cur.execute("""
-                    WITH near AS (
-                        SELECT title, similarity(title, %(t)s) AS score FROM kalshi_titles
-                        ORDER BY title <-> %(t)s LIMIT %(pool)s)
                     SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
-                           m.title, e.category, m.volume, n.score,
+                           m.title, e.category, m.volume,
                            to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
                            EXISTS (SELECT 1 FROM kalshi_candles c
                                    WHERE c.ticker = m.ticker) AS got
-                    FROM near n
-                    JOIN kalshi_markets m ON m.title = n.title
-                    JOIN kalshi_events e USING (event_ticker)
-                    WHERE n.score >= %(thr)s AND m.ticker <> %(id)s
-                    ORDER BY m.title, m.volume DESC NULLS LAST""", args)
-                found = sorted(cur.fetchall(),
-                               key=lambda r: (-r["score"], -float(r["volume"] or 0)))
+                    FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
+                    WHERE m.title = ANY(%(titles)s) AND m.ticker <> %(id)s
+                    ORDER BY m.title, m.volume DESC NULLS LAST""",
+                            dict(args, titles=list(scores)))
+                found = [dict(r, score=scores[r["title"]]) for r in cur.fetchall()]
+                found.sort(key=lambda r: (-r["score"], -float(r["volume"] or 0)))
                 rows += found[:per]
             if same_venue or name not in POLY:
                 # The % operator filters at pg_trgm's own similarity_threshold
