@@ -508,20 +508,25 @@ def test_usage(keys, ticker):
     ua = rows("SELECT count(*) AS n FROM api_requests WHERE user_agent LIKE 'pmapi/1.0 (%%)'")[0]["n"]
     check(ua > 0, f"10 pmapi's requests carry the machine name ({ua})")
 
-    # The table goes away: requests must not notice, and nothing is lost.
+    # The table refuses every write: requests must not notice, and nothing is
+    # lost. (Not a rename: the search path also holds public, so a renamed
+    # table would quietly send the writes to the real api_requests.)
     with db.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("ALTER TABLE api_requests RENAME TO api_requests_away")
+            cur.execute("ALTER TABLE api_requests ADD CONSTRAINT refuse_all CHECK (false) NOT VALID")
     api = Api(keys["full"])
     codes = [api.get("/v1/markets", q=f"usage-probe-{i}", limit=1).status_code for i in range(5)]
     time.sleep(7)
     with db.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("ALTER TABLE api_requests_away RENAME TO api_requests")
+            cur.execute("ALTER TABLE api_requests DROP CONSTRAINT refuse_all")
     check(codes == [200] * 5, f"10 requests answer while their records cannot be written: {codes}")
     time.sleep(10)
     n = rows("SELECT count(*) AS n FROM api_requests WHERE params->>'q' LIKE 'usage-probe-%%'")[0]["n"]
-    check(n == 5, f"10 ...and their records arrive once the table is back ({n} of 5)")
+    check(n == 5, f"10 ...and their records arrive once it takes them again ({n} of 5)")
+    leaked = db.query("SELECT count(*) AS n FROM public.api_requests"
+                      " WHERE params->>'q' LIKE 'usage-probe-%%'")[0]["n"]
+    check(leaked == 0, f"10 none of them reached the real api_requests ({leaked})")
 
     # The viewer's page, every window.
     procs["viewer"] = subprocess.Popen(
