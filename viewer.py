@@ -1356,21 +1356,22 @@ def manage():
         except ValueError:
             limit = 300
 
-    s = db.query("""
+    counts_ready()
+    s = _cached(("manage summary",), 120, lambda: db.query("""
         SELECT (SELECT count(*) FROM kalshi_markets) k_markets,
-               (SELECT count(DISTINCT ticker) FROM kalshi_candles) k_with,
+               (SELECT count(*) FROM kalshi_candle_counts) k_with,
                (SELECT count(*) FROM poly_markets) p_markets,
                (SELECT count(DISTINCT condition_id) FROM poly_candles) p_with,
                (SELECT count(*) FROM kalshi_markets WHERE close_time > now())
              + (SELECT count(*) FROM poly_markets WHERE end_date > now()) active,
                (SELECT count(*) FROM kalshi_markets WHERE close_time <= now())
              + (SELECT count(*) FROM poly_markets WHERE end_date <= now()) expired,
-               pg_size_pretty(pg_database_size(current_database())) size""")[0]
+               pg_size_pretty(pg_database_size(current_database())) size""")[0])
 
-    categories = [r["c"] for r in db.query("""
+    categories = _cached(("manage categories",), 600, lambda: [r["c"] for r in db.query("""
         SELECT DISTINCT category AS c FROM kalshi_events WHERE category IS NOT NULL
         UNION SELECT DISTINCT category FROM poly_events WHERE category IS NOT NULL
-        ORDER BY c""")]
+        ORDER BY c""")])
 
     # Render one page; the rest arrives as the sentinel scrolls into view.
     page = PAGE_ROWS if limit is None else min(limit, PAGE_ROWS)
@@ -3056,7 +3057,7 @@ VISUALISE_PAGE = """
 {% endif %}
 
 <div class="avail">
-  <b>markets with candles stored</b>
+  <b>markets with the most candles stored</b>
   <table>
     <tr><th>market</th><th>candles</th><th>from</th><th>to</th></tr>
     {% for a in available %}
@@ -3119,7 +3120,8 @@ def plottable():
                min(c.ts)::date::text, max(c.ts)::date::text, max(p.question)
         FROM poly_candles c LEFT JOIN poly_markets p ON p.condition_id = c.condition_id
         GROUP BY c.condition_id
-        ORDER BY n DESC""")
+        ORDER BY n DESC
+        LIMIT 2000""")      # the busiest; any other ticker can be typed in
 
 
 @app.route("/visualise")
