@@ -51,11 +51,13 @@ KINDS = {"hot": (0.9, 6), "warm": (0.06, 3), "cold": (0.003, 2), "never": (0.0, 
 # The made-up market universe
 # ---------------------------------------------------------------------------
 
-def build(t0):
-    """Markets and events around start time t0, the same for the same t0."""
+def build(t0, scale=1):
+    """Markets and events around start time t0, the same for the same t0 and
+    scale; `scale` multiplies every kind of market (stress tests)."""
     r = random.Random(SEED)
-    plan = ([("hot", 30), ("warm", 120), ("cold", 500), ("never", 300)],
-            [("new_hot", 10), ("new_warm", 10)], [("closing", 25)], [("closed", 80)])
+    plan = tuple([(kind, count * scale) for kind, count in group] for group in
+                 ([("hot", 30), ("warm", 120), ("cold", 500), ("never", 300)],
+                  [("new_hot", 10), ("new_warm", 10)], [("closing", 25)], [("closed", 80)]))
     markets = []
     for group in plan:
         for kind, count in group:
@@ -156,9 +158,9 @@ def candle(m, minute, now=None):
 # ---------------------------------------------------------------------------
 
 class Kalshi:
-    def __init__(self, t0):
+    def __init__(self, t0, scale=1):
         self.t0 = t0
-        self.markets, self.events = build(t0)
+        self.markets, self.events = build(t0, scale)
         self.by_ticker = {m["ticker"]: m for m in self.markets}
         self.mode = "normal"
         self.log = []           # (time, path, status)
@@ -266,15 +268,15 @@ class Kalshi:
         return 404, {"error": "not found"}
 
 
-def serve(port, state):
+def serve(port, state, scale=1):
     """The API on `port`; /_control and /_stats on `port` + 1, which stay up
     while the API is offline."""
     t0 = time.time()
-    k = Kalshi(t0)
+    k = Kalshi(t0, scale)
     k.server = None
     k.offline_after = None
     with open(state, "w", encoding="utf-8") as f:
-        json.dump({"t0": t0}, f)
+        json.dump({"t0": t0, "scale": scale}, f)
 
     def go_offline():
         k.mode = "offline"
@@ -372,5 +374,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--state", required=True)
+    parser.add_argument("--scale", type=int, default=1, help="multiply every kind of market")
     args = parser.parse_args()
-    serve(args.port, args.state)
+    serve(args.port, args.state, args.scale)
