@@ -81,18 +81,27 @@ def start(name, *args):
                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
 
+def _signal(p, sig):
+    """Signal a process's whole group if it leads one, else just the process."""
+    try:
+        os.killpg(p.pid, sig)
+    except ProcessLookupError:
+        try:
+            p.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+
 def stop(name, sig=signal.SIGTERM):
     """Stop a process and everything it started (the API's worker processes)."""
     p = procs.pop(name, None)
     if p and p.poll() is None:
-        try:
-            os.killpg(p.pid, sig)
-        except ProcessLookupError:
-            pass
+        _signal(p, sig)
         try:
             p.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
+            _signal(p, signal.SIGKILL)
+            p.wait(timeout=10)
 
 
 def run(*args):
@@ -537,7 +546,8 @@ def test_usage(keys, ticker):
     procs["viewer"] = subprocess.Popen(
         [sys.executable, "viewer.py", "--host", "127.0.0.1", "--port", str(VIEWER_PORT)],
         cwd=ROOT, env=dict(ENV, VIEWER_USER="", VIEWER_PASSWORD_HASH=""),
-        stdout=open(WORK / "viewer.log", "a"), stderr=subprocess.STDOUT)
+        stdout=open(WORK / "viewer.log", "a"), stderr=subprocess.STDOUT,
+        start_new_session=True)
     page = None
     for _ in range(60):
         try:
