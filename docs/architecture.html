@@ -387,6 +387,8 @@
       <tr><th>What happens</th><th>What the system does</th></tr>
       <tr><td>A program crashes</td><td>Restarts and carries on from the bookkeeping; nothing lost, nothing doubled.</td></tr>
       <tr><td>Network drops out</td><td>Every request pauses; one check every 30 s; all carry on from where they were as soon as it is back.</td></tr>
+      <tr><td>Network refuses new connections</td><td>Programs keep working on connections already open, so don't restart them until it lifts.</td></tr>
+      <tr><td>Two writers on the same rows</td><td>Every writer locks bookkeeping rows in ticker order, so they queue instead of deadlocking.</td></tr>
       <tr><td>Kalshi throttles</td><td>Budget halves for everyone at once, then recovers slowly.</td></tr>
       <tr><td>Discovery stops mid-scan</td><td>Saves its place after every page and finishes the same scan from there.</td></tr>
       <tr><td>activity.py is down</td><td>Scans wait in order and are scored one by one when it returns.</td></tr>
@@ -406,6 +408,7 @@
     <li class="done">Database upgrade<span>Old layout with <code>filled</code> upgraded in place; candles kept; rollups rebuilt.</span></li>
     <li class="done" id="e2e">30-minute end-to-end run with faults<span>Crashes, a network drop, 429s, Redis loss, a half scan and slow answers: 57,303 traded minutes all exactly right — 0 missing, 0 wrong, 0 extra; budget held; busiest markets all hot.</span></li>
     <li class="done">Real Kalshi<span>13 settled markets: candle volumes add up exactly to Kalshi's own volume; 7,709 quote-only minutes dropped.</span></li>
+    <li class="done">Stress test, 1 Nov<span>8M candles, 100 clients, 1,000 pushes, faults under load, collectors at 10×: 7 faults found and fixed. <a href="https://claude.ai/artifact/4m2kCnAYLPQGXCc2ddr7Lo">Report</a></span></li>
     <li class="done">Viewer panels<span>Related wording matches scoring every market (84 cases); expiry and odds filters exact; first load 0.5 s, slider 0.02 s.</span></li>
   </ul>
 </section>
@@ -449,6 +452,10 @@
       <tr><td>Intervals from 1-minute rows</td><td>Always matches what is stored, even right after a backfill; the rollups can lag 30 min.</td></tr>
       <tr><td>Nearby: expiry and odds only</td><td>A strike depends on how a title is worded; expiry and price do not.</td></tr>
       <tr><td>Prices worked out when read</td><td>Newest candle if newer than the listing, else the listing's last price — nothing extra stored.</td></tr>
+      <tr><td>API as 4 processes</td><td>One Python process tops out near 40 requests a second; four reach about 100.</td></tr>
+      <tr><td>Jobs held by a lease</td><td>A running backfill job has a heartbeat; any API process takes over one whose heartbeat stops.</td></tr>
+      <tr><td>Pushed backfills batched</td><td>Up to 100 queued jobs share each Kalshi request: 1,055 jobs took 146 requests.</td></tr>
+      <tr><td>Per-second cap on the budget</td><td>Kalshi counts per second; at most 15 a second, so raising the budget can't trip it.</td></tr>
       <tr><td>Usage history in plain files</td><td>One JSON line a minute (~100 bytes) in <code>data/state/monitor/</code>, apart from the database.</td></tr>
       <tr><td>Related wording over distinct titles</td><td>Nearest titles first, then each one's busiest market: 0.5 s instead of 6 s.</td></tr>
     </table>
