@@ -1912,6 +1912,15 @@ def api_usage():
     refresh = request.args.get("refresh") != "off"
     end = int(time.time() // step * step)
     starts = list(range(end - (length // step - 1) * step, end + step, step))
+    # While the history is shorter than the window, the charts start where it
+    # does instead of leaving most of their width empty (at least 12 bars).
+    first = [line["t"] for line in monitor.read(starts[0])[:1]]
+    if db.query("SELECT to_regclass('api_requests') IS NOT NULL AS ok")[0]["ok"]:
+        at = db.query("SELECT EXTRACT(EPOCH FROM min(at)) AS t FROM api_requests"
+                      " WHERE at >= to_timestamp(%s)", (starts[0],))[0]["t"]
+        first += [float(at)] if at is not None else []
+    if first:
+        starts = starts[-max(12, len([s for s in starts if s + step > min(first)])):]
     budget, behind_chart, bf = _monitor_charts(starts, step, length)
     page = dict(windows=list(USAGE_WINDOWS), window=window, refresh=refresh,
                 bucket_label=bucket_label, now=datetime.now(USAGE_TZ).strftime("%H:%M:%S"),
