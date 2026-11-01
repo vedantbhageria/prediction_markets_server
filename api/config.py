@@ -27,8 +27,14 @@ BAD_KEYS_PER_MIN = _num("API_BAD_KEYS_PER_MIN", 300)
 MAX_ROWS = 10_000               # rows per page, any endpoint
 DEFAULT_ROWS = 100              # ...when `limit` is not given (candles: MAX_ROWS)
 STATEMENT_TIMEOUT = _num("API_STATEMENT_TIMEOUT_SECONDS", 30)
-DB_POOL = _num("API_DB_POOL", 12)
+# Per API process. The API runs as several processes (uvicorn --workers,
+# API_WORKERS in the service file), each with its own pool and job threads.
+DB_POOL = _num("API_DB_POOL", 8)
 JOB_WORKERS = _num("API_JOB_WORKERS", 2)
+# A running job whose heartbeat is older than this is taken over by another
+# worker -- how a job outlives the process that started it.
+JOB_LEASE = _num("API_JOB_LEASE_SECONDS", 120)
+JOB_BATCH = 100                 # queued jobs taken at once, to share requests
 
 # Live collection runs this far behind the clock (a minute to settle, a cycle
 # to fetch it), so "complete" coverage is judged up to here.

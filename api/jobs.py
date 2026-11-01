@@ -6,8 +6,12 @@ the same fetcher and bookkeeping as live.py and backfill.py. Its requests use
 the shared Kalshi budget at "api" priority -- the same as warm: after hot
 markets, before backfill.py -- counted on a line of their own.
 
-Jobs live in api_jobs, so they outlast the API: one cut short by a restart is
-queued again and run from the start (fetching is idempotent).
+Jobs live in api_jobs, so they outlast the API. Each API process runs a few
+worker threads; a worker takes up to JOB_BATCH queued jobs at once and plans
+them together, so jobs pushed together share requests (100 markets each)
+instead of one request per market. While it runs them it renews their
+heartbeat; a running job whose heartbeat goes stale -- its process died -- is
+taken over by any worker and run from the start (fetching is idempotent).
 """
 
 import logging
@@ -15,11 +19,13 @@ import threading
 import time
 
 import psycopg2
+from psycopg2.extras import execute_values
 
 import db
 import fetch
 import ratelimit
 import settings
+from api import config
 from api.common import ApiError, iso
 
 log = logging.getLogger("api.jobs")
@@ -88,21 +94,19 @@ def get(job_id):
 
 
 class Worker:
-    """A few threads that take queued jobs one at a time."""
+    """A few threads that take queued jobs in batches, and one that keeps the
+    heartbeat of the jobs this process is running."""
 
     def __init__(self, threads):
         self.stop = threading.Event()
+        self.mine = set()               # job ids running in this process
+        self.mine_lock = threading.Lock()
         self.threads = [threading.Thread(target=self._loop, daemon=True, name=f"job-{i}")
                         for i in range(threads)]
+        self.threads.append(threading.Thread(target=self._heartbeat, daemon=True,
+                                             name="job-heartbeat"))
 
     def start(self):
-        try:
-            n = db.execute("UPDATE api_jobs SET status = 'queued', started_at = NULL,"
-                           " requests_done = 0, candles = 0 WHERE status = 'running'")
-            if n:
-                log.info("re-queued %d backfill jobs cut short by a restart", n)
-        except Exception as exc:
-            log.warning("could not re-queue unfinished jobs: %s", exc)
         for t in self.threads:
             t.start()
 
@@ -112,59 +116,110 @@ class Worker:
         for t in self.threads:
             t.join(timeout=15)
 
+    def _heartbeat(self):
+        while not self.stop.wait(config.JOB_LEASE / 4):
+            with self.mine_lock:
+                ids = list(self.mine)
+            if ids:
+                try:
+                    db.execute("UPDATE api_jobs SET heartbeat_at = now()"
+                               " WHERE job_id = ANY(%s) AND status = 'running'", (ids,))
+                except Exception as exc:
+                    log.warning("could not renew job heartbeats: %s", exc)
+
     def _claim(self):
-        rows = db.query("""
-            UPDATE api_jobs SET status = 'running', started_at = now()
-            WHERE job_id = (SELECT job_id FROM api_jobs WHERE status = 'queued'
-                            ORDER BY job_id LIMIT 1 FOR UPDATE SKIP LOCKED)
-            RETURNING *""")
-        return rows[0] if rows else None
+        """Queued jobs, and running ones whose worker went quiet, oldest first."""
+        return db.query("""
+            WITH picked AS (
+                SELECT job_id FROM api_jobs
+                WHERE status = 'queued'
+                   OR (status = 'running' AND COALESCE(heartbeat_at, started_at, requested_at)
+                                              < now() - make_interval(secs => %s))
+                ORDER BY job_id LIMIT %s FOR UPDATE SKIP LOCKED)
+            UPDATE api_jobs j SET status = 'running', started_at = now(), heartbeat_at = now(),
+                   requests_done = 0, candles = 0, requests_total = NULL
+            FROM picked WHERE j.job_id = picked.job_id
+            RETURNING j.*""", (config.JOB_LEASE, config.JOB_BATCH))
 
     def _loop(self):
         with ratelimit.using("api"):
             while not self.stop.is_set():
                 try:
-                    job = self._claim()
+                    jobs = self._claim()
                 except Exception as exc:
                     log.warning("could not read the job queue: %s", exc)
-                    job = None
-                if job is None:
+                    jobs = []
+                if not jobs:
                     _wake.wait(5)
                     _wake.clear()
                     continue
+                ids = {j["job_id"] for j in jobs}
+                with self.mine_lock:
+                    self.mine |= ids
                 try:
-                    self._run(job)
+                    self._run(jobs)
                 except Exception as exc:
-                    log.exception("job %s failed", job["job_id"])
-                    self._finish(job, "failed", f"{type(exc).__name__}: {exc}")
+                    log.exception("jobs %s failed", sorted(ids))
+                    for j in jobs:
+                        self._finish(j, "failed", f"{type(exc).__name__}: {exc}",
+                                     only_running=True)
+                finally:
+                    with self.mine_lock:
+                        self.mine -= ids
 
-    def _finish(self, job, status, error=None):
-        db.execute("UPDATE api_jobs SET status = %s, finished_at = now(), error = %s"
-                   " WHERE job_id = %s", (status, error, job["job_id"]))
+    def _finish(self, job, status, error=None, candles=None, only_running=False):
+        db.execute("UPDATE api_jobs SET status = %s, finished_at = now(), error = %s,"
+                   " candles = COALESCE(%s, candles) WHERE job_id = %s"
+                   + (" AND status = 'running'" if only_running else ""),
+                   (status, error, candles, job["job_id"]))
 
-    def _run(self, job):
-        ticker = job["ticker"]
-        lo, hi = int(job["from_ts"].timestamp()), int(job["to_ts"].timestamp())
-        requests = fetch.plan([(ticker, lo, hi)])
-        if not requests:
-            return self._finish(job, "failed", "Kalshi rejected this ticker recently;"
-                                " try again in an hour")
-        db.execute("UPDATE api_jobs SET requests_total = %s WHERE job_id = %s",
-                   (len(requests), job["job_id"]))
-        log.info("job %s: %s, %s requests", job["job_id"], ticker, len(requests))
+    def _run(self, jobs):
+        by_ticker = {j["ticker"]: j for j in jobs}      # one open job per market
+        requests = fetch.plan([(t, int(j["from_ts"].timestamp()), int(j["to_ts"].timestamp()))
+                               for t, j in by_ticker.items()])
+        total = {t: 0 for t in by_ticker}
+        for tickers, _, _ in requests:
+            for t in tickers:
+                total[t] += 1
+        for t, n in total.items():
+            if not n:
+                self._finish(by_ticker[t], "failed", "Kalshi rejected this ticker recently;"
+                             " try again in an hour")
+        with db.cursor(dict_rows=False) as cur:
+            execute_values(cur, "UPDATE api_jobs j SET requests_total = v.n"
+                                " FROM (VALUES %s) AS v(job_id, n) WHERE j.job_id = v.job_id",
+                           [(by_ticker[t]["job_id"], n) for t, n in total.items() if n])
+        log.info("jobs: %d markets in %d requests", sum(1 for n in total.values() if n),
+                 len(requests))
+
+        candles = {t: 0 for t in by_ticker}
+        failed = {}
         for request in requests:
+            got = {}
             n = None
             for _ in range(ATTEMPTS):
-                n = fetch.run(request, self.stop)
+                n = fetch.run(request, self.stop, got)
                 if n is not None or self.stop.wait(10):
                     break
             if self.stop.is_set():
-                return          # left running: re-queued when the API starts again
-            if n is None:
-                why = ("Kalshi rejects this ticker" if fetch._bad.get(ticker, 0) > time.time()
-                       else f"Kalshi did not answer after {ATTEMPTS} tries")
-                return self._finish(job, "failed", why)
-            db.execute("UPDATE api_jobs SET requests_done = requests_done + 1,"
-                       " candles = candles + %s WHERE job_id = %s", (n, job["job_id"]))
-        self._finish(job, "done")
-        log.info("job %s: %s done", job["job_id"], ticker)
+                return          # left running: another worker takes them over
+            for t in request[0]:
+                if t in got:
+                    candles[t] += got[t]
+                else:
+                    failed.setdefault(t, "Kalshi rejects this ticker"
+                                      if fetch._bad.get(t, 0) > time.time()
+                                      else f"Kalshi did not answer after {ATTEMPTS} tries")
+            with db.cursor(dict_rows=False) as cur:
+                execute_values(cur, "UPDATE api_jobs j SET requests_done = requests_done + 1,"
+                                    " candles = v.c FROM (VALUES %s) AS v(job_id, c)"
+                                    " WHERE j.job_id = v.job_id",
+                               [(by_ticker[t]["job_id"], candles[t]) for t in request[0]])
+        for t, job in by_ticker.items():
+            if not total[t]:
+                continue
+            if t in failed:
+                self._finish(job, "failed", failed[t], candles[t])
+            else:
+                self._finish(job, "done", None, candles[t])
+        log.info("jobs: %d done, %d failed", len(by_ticker) - len(failed), len(failed))

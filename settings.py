@@ -40,6 +40,9 @@ MARKET_CATEGORIES = _list("MARKET_CATEGORIES")       # Kalshi only; empty = all
 # of this one budget, shared through Redis. Kalshi publishes 20/s for signed-in
 # Basic accounts and nothing for anonymous ones, so the default stays far below.
 KALSHI_REQUESTS_PER_MIN = _num("KALSHI_REQUESTS_PER_MIN", 240)
+# ...and never more than this in any one second, whatever the budget: Kalshi
+# counts per second (20/s for signed-in Basic accounts).
+KALSHI_MAX_PER_SECOND = _num("KALSHI_MAX_PER_SECOND", 15, float)
 
 # --- activity score ----------------------------------------------------------
 HALF_LIFE_MINUTES = _num("ACTIVITY_HALF_LIFE_MINUTES", 60, float)

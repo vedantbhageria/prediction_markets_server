@@ -258,9 +258,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked_at   TIMESTAMPTZ
 );
 
--- Backfills asked for through the API, run by a worker inside it. A job is
--- queued, then running, then done or failed; one left running by a restart
--- is queued again.
+-- Backfills asked for through the API, run by workers inside it. A job is
+-- queued, then running, then done or failed; a running job whose heartbeat
+-- stops (its process died) is taken over by another worker.
 CREATE TABLE IF NOT EXISTS api_jobs (
     job_id         BIGSERIAL PRIMARY KEY,
     key_id         BIGINT REFERENCES api_keys (key_id) ON DELETE SET NULL,
@@ -274,8 +274,10 @@ CREATE TABLE IF NOT EXISTS api_jobs (
     requests_total INTEGER,
     requests_done  INTEGER NOT NULL DEFAULT 0,
     candles        INTEGER NOT NULL DEFAULT 0,
-    error          TEXT
+    error          TEXT,
+    heartbeat_at   TIMESTAMPTZ          -- renewed while a worker runs it
 );
+ALTER TABLE api_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
 
 -- Every API request, for the viewer's /api-usage page. The API writes them in
 -- batches a few seconds after the fact; store.prune drops them after 30 days.

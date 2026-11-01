@@ -43,7 +43,7 @@ ENV = dict(os.environ,
            PGSCHEMA="pm_api_test", REDIS_PREFIX="pmapitest:", PM_STATE_DIR=str(WORK / "state"),
            KALSHI_API_URL=f"http://127.0.0.1:{MOCK_PORT}/trade-api/v2", LIVE_VENUES="kalshi",
            KALSHI_REQUESTS_PER_MIN="600", BACKFILL_DAYS="2", API_RATE_PER_MIN="100000",
-           API_BACKFILL_PER_MIN="1000",
+           API_BACKFILL_PER_MIN="1000", API_JOB_LEASE_SECONDS="20",
            PYTHONUNBUFFERED="1")
 os.environ.update({k: ENV[k] for k in ("PGSCHEMA", "REDIS_PREFIX", "PM_STATE_DIR",
                                        "KALSHI_API_URL", "BACKFILL_DAYS")})
@@ -78,17 +78,21 @@ def start(name, *args):
     log.write(f"\n===== start {time.strftime('%H:%M:%S')}\n")
     log.flush()
     procs[name] = subprocess.Popen([sys.executable, *args], cwd=ROOT, env=ENV,
-                                   stdout=log, stderr=subprocess.STDOUT)
+                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
 
 def stop(name, sig=signal.SIGTERM):
+    """Stop a process and everything it started (the API's worker processes)."""
     p = procs.pop(name, None)
     if p and p.poll() is None:
-        p.send_signal(sig)
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            pass
         try:
             p.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            p.kill()
+            os.killpg(p.pid, signal.SIGKILL)
 
 
 def run(*args):
@@ -103,8 +107,9 @@ def mock_mode(m):
 
 
 def start_api():
+    # Two worker processes, as in production: jobs move between them by lease.
     start("api", "-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port",
-          str(API_PORT))
+          str(API_PORT), "--workers", "2")
     for _ in range(120):
         try:
             if requests.get(API + "/health", timeout=2).status_code == 200:

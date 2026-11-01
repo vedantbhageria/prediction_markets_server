@@ -22,6 +22,9 @@ Phases (each records its numbers in /tmp/pmstress/results.json):
   collect   discover, activity, live and backfill against a simulated Kalshi
             ten times the size, at five times today's budget
   records   every API request of the run is in api_requests
+  store     the writers production showed failing: candle writes and scoring
+            racing on the same bookkeeping rows (deadlocks), a backfill into
+            compressed days, and a prune of markets in compressed chunks
 """
 
 import json
@@ -103,17 +106,22 @@ def summary(lat, statuses, seconds):
 def start(name, args, env=None, app=None):
     log = open(WORK / f"{name}.log", "a")
     e = dict(env or ENV, PGAPPNAME=app or f"pmstress-{name}")
-    procs[name] = subprocess.Popen(args, cwd=ROOT, env=e, stdout=log, stderr=subprocess.STDOUT)
+    procs[name] = subprocess.Popen(args, cwd=ROOT, env=e, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
 
 
 def stop(name, sig=signal.SIGTERM):
+    """Stop a process and everything it started (the API's worker processes)."""
     p = procs.pop(name, None)
     if p and p.poll() is None:
-        p.send_signal(sig)
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            pass
         try:
             p.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            p.kill()
+            os.killpg(p.pid, signal.SIGKILL)
 
 
 def wait_http(url, seconds=90):
@@ -137,9 +145,12 @@ def start_redis():
             time.sleep(0.1)
 
 
+API_WORKERS = int(os.environ.get("STRESS_API_WORKERS", "4"))
+
+
 def start_api():
     start("api", [sys.executable, "-m", "uvicorn", "api.main:app", "--host", "127.0.0.1",
-                  "--port", str(API_PORT)])
+                  "--port", str(API_PORT), "--workers", str(API_WORKERS)])
     wait_http(API + "/health")
 
 
@@ -474,7 +485,7 @@ def phase_load(keys):
         with Watch() as w:
             got = hammer(API, keys["stress"], "api", clients, 25)
         row = dict(summary([g[0] for g in got], [g[1] for g in got], 25), clients=clients,
-                   **w.report())
+                   api_workers=API_WORKERS, **w.report())
         out.append(row)
         say(f"load: {clients} clients: {row['per_second']}/s, p50 {row['p50_ms']} ms, p95"
             f" {row['p95_ms']} ms, p99 {row['p99_ms']} ms, {row['statuses']}, api"
@@ -757,7 +768,85 @@ def phase_records():
     save()
 
 
-PHASES = ["data", "reads", "load", "limits", "pushes", "viewer", "faults", "collect", "records"]
+def phase_store():
+    import activity
+    from datetime import datetime, timedelta, timezone
+    res = {}
+    say("store: 8 writers and the scorer racing on the same bookkeeping rows")
+    tickers = [f"SM{i:05d}" for i in range(2000)]
+    scan = db.query("INSERT INTO kalshi_scans (finished_at) VALUES (now()) RETURNING scan_id")[0]["scan_id"]
+    stop_at = time.time() + 60
+    errors, writes, scores = [], [0], [0]
+
+    def writer(seed):
+        rng = random.Random(seed)
+        minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        while time.time() < stop_at:
+            some = rng.sample(tickers, 100)
+            t = minute - timedelta(minutes=rng.randrange(1, 600))
+            try:
+                store.write_kalshi_fetch([(x, t, 0.5, 0.5, 0.5, 0.5, 1, 1) for x in some],
+                                         [(x, t, t + timedelta(minutes=1)) for x in some])
+                writes[0] += 1
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+
+    def scorer():
+        nonlocal scan
+        while time.time() < stop_at:
+            db.execute("INSERT INTO kalshi_observations (scan_id, ticker, volume, asked_at,"
+                       " answered_at) SELECT %s, ticker, volume + 1, now(), now()"
+                       " FROM kalshi_markets WHERE ticker LIKE 'SM%%'", (scan,))
+            try:
+                activity.score_scan(scan)
+                scores[0] += 1
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+            scan = db.query("INSERT INTO kalshi_scans (finished_at) VALUES (now())"
+                            " RETURNING scan_id")[0]["scan_id"]
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    threads.append(threading.Thread(target=scorer))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    res["race"] = {"writes": writes[0], "scorings": scores[0],
+                   "errors": {e: errors.count(e) for e in set(errors)}}
+    say(f"store: {res['race']}")
+
+    say("store: a 100-market backfill write into compressed days")
+    day = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(days=12)
+    rows = [(f"SM{i:05d}", day + timedelta(minutes=k), 0.5, 0.51, 0.49, 0.5, 3, 100)
+            for i in range(100) for k in range(1440)]
+    a = time.time()
+    try:
+        store.write_kalshi_fetch(rows, [(f"SM{i:05d}", day, day + timedelta(days=1))
+                                        for i in range(100)])
+        res["compressed_write"] = {"rows": len(rows), "seconds": round(time.time() - a, 1),
+                                   "error": None}
+    except Exception as exc:
+        res["compressed_write"] = {"rows": len(rows), "error": f"{type(exc).__name__}: {exc}"[:200]}
+    say(f"store: {res['compressed_write']}")
+
+    say("store: prune 150 markets whose candles sit in compressed chunks")
+    db.execute("UPDATE kalshi_markets SET close_time = now() - interval '40 days'"
+               " WHERE ticker BETWEEN 'SM01850' AND 'SM01999'")
+    before = db.query("SELECT count(*) AS n FROM kalshi_candles WHERE ticker BETWEEN"
+                      " 'SM01850' AND 'SM01999'")[0]["n"]
+    a = time.time()
+    try:
+        res["prune"] = {"candles_to_delete": before, "deleted": store.prune(30),
+                        "seconds": round(time.time() - a, 1), "error": None}
+    except Exception as exc:
+        res["prune"] = {"candles_to_delete": before, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    say(f"store: {res['prune']}")
+    results["store"] = res
+    save()
+
+
+PHASES = ["data", "reads", "load", "limits", "pushes", "viewer", "faults", "collect", "records",
+          "store"]
 
 
 def main():
@@ -776,11 +865,13 @@ def main():
         if need_api:
             start_api()
         for name in wanted:
-            if name in ("data", "collect", "records"):
+            if name in ("data", "collect", "records", "store"):
                 continue
             globals()[f"phase_{name}"](keys)
         if "records" in wanted:
             phase_records()
+        if "store" in wanted:
+            phase_store()
         stop("viewer")
         stop("api")
         if "collect" in wanted:

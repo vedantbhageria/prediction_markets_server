@@ -140,6 +140,11 @@ def score_scan(scan):
             "half": settings.HALF_LIFE_MINUTES}
     with connection() as conn:
         with conn.cursor() as cur:
+            # The rows this scan updates, locked in ticker order first, as
+            # every writer of kalshi_tracking does (store.LOCK_TRACKING).
+            cur.execute("SELECT 1 FROM kalshi_tracking WHERE ticker IN (SELECT ticker"
+                        " FROM kalshi_observations WHERE scan_id = %(scan)s)"
+                        " ORDER BY ticker FOR UPDATE", args)
             cur.execute("SELECT count(DISTINCT ticker) FROM kalshi_observations"
                         " WHERE scan_id = %(scan)s", args)
             readings = cur.fetchone()[0]
@@ -183,7 +188,7 @@ def hot_cap(warm=None):
     used over the last hour - one pass over the warm backlog per scan
     interval, then 100 markets per remaining request per minute.
     """
-    budget = settings.KALSHI_REQUESTS_PER_MIN * ratelimit.factor()
+    budget = ratelimit.effective_budget()
     discover = ratelimit.used("discover", 60)
     discover = 20 if not discover else discover / 60
     discover += (ratelimit.used("api", 60) or 0) / 60

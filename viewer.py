@@ -76,11 +76,22 @@ def require_login():
 POLY = {"poly_events", "poly_markets", "poly_candles"}
 
 
+@lru_cache(maxsize=None)
+def _columns(name):
+    return [r["column_name"] for r in db.query(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND table_name = %s"
+        " ORDER BY ordinal_position", (name,))]
+
+
 def key_col(name):
-    # The grouping tables key on their own column, not a market id.
+    # The grouping tables key on their own column, not a market id. A table
+    # with neither (the API's own, say) is ordered by its first column.
     grouping = {"kalshi_series": "series_ticker", "kalshi_events": "event_ticker",
                 "poly_events": "event_id"}
-    return grouping.get(name, "condition_id" if name in POLY else "ticker")
+    key = grouping.get(name, "condition_id" if name in POLY else "ticker")
+    columns = _columns(name)
+    return key if not columns or key in columns else columns[0]
 
 
 def dim_source(name, dim):

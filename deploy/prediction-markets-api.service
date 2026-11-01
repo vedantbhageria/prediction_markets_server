@@ -16,9 +16,11 @@ Wants=network-online.target
 [Service]
 User=theonealpha
 WorkingDirectory=/home/theonealpha/prediction_markets_server
-Environment=API_HOST=127.0.0.1 API_PORT=8000 PYTHONUNBUFFERED=1
+# Four worker processes: one Python process tops out near 40 requests a
+# second; backfill jobs move between workers by lease, so any number is safe.
+Environment=API_HOST=127.0.0.1 API_PORT=8000 API_WORKERS=4 PYTHONUNBUFFERED=1
 EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
-ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/uvicorn api.main:app --host ${API_HOST} --port ${API_PORT}
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/uvicorn api.main:app --host ${API_HOST} --port ${API_PORT} --workers ${API_WORKERS}
 # If Tailscale is not up yet at boot the address cannot be bound; try again.
 Restart=always
 RestartSec=5

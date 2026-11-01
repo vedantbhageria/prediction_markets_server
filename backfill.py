@@ -76,15 +76,22 @@ def selection(args):
 def mark_untraded(cond, params):
     """Markets whose volume was 0 when last measured have no trades before
     that, so their history is complete without asking Kalshi."""
-    return db.execute(f"""
-        UPDATE kalshi_tracking t
-        SET candles_fetched_from = to_timestamp(GREATEST(
-                %s, EXTRACT(EPOCH FROM date_trunc('minute', COALESCE(m.open_time, t.candles_fetched_from)))))
-        FROM kalshi_markets m
-        WHERE m.ticker = t.ticker AND t.volume = 0 AND {cond}
-          AND t.candles_fetched_from > to_timestamp(GREATEST(
-                %s, EXTRACT(EPOCH FROM date_trunc('minute', COALESCE(m.open_time, t.candles_fetched_from)))))""",
-        [floor_ts()] + params + [floor_ts()])
+    behind = f"""t.volume = 0 AND {cond}
+          AND t.candles_fetched_from > to_timestamp(GREATEST(%s,
+                EXTRACT(EPOCH FROM date_trunc('minute', COALESCE(m.open_time, t.candles_fetched_from)))))"""
+    args = params + [floor_ts()]
+    with db.cursor(dict_rows=False) as cur:
+        # Locked in ticker order first, as every writer of kalshi_tracking does.
+        cur.execute(f"""
+            SELECT 1 FROM kalshi_tracking t JOIN kalshi_markets m USING (ticker)
+            WHERE {behind} ORDER BY t.ticker FOR UPDATE OF t""", args)
+        cur.execute(f"""
+            UPDATE kalshi_tracking t
+            SET candles_fetched_from = to_timestamp(GREATEST(%s,
+                EXTRACT(EPOCH FROM date_trunc('minute', COALESCE(m.open_time, t.candles_fetched_from)))))
+            FROM kalshi_markets m
+            WHERE m.ticker = t.ticker AND {behind}""", [floor_ts()] + args)
+        return cur.rowcount
 
 
 def history_spans(cond, params, limit):

@@ -102,9 +102,12 @@ def _rows(ticker, candles, lo, hi):
     return rows
 
 
-def run(request, stop=None):
+def run(request, stop=None, counts=None):
     """Fetch and store one planned request. Returns candles written, or None
-    if the request failed (nothing is recorded then)."""
+    if the request failed (nothing is recorded then). `counts`, if given, is
+    set to {ticker: candles written} for every ticker Kalshi answered for --
+    0 included -- which, when a batch is split to find a bad ticker, is how
+    the good ones are told apart."""
     tickers, lo, hi = request
     try:
         # Kalshi's window is on end_period_ts, both ends inclusive: minute
@@ -118,7 +121,8 @@ def run(request, stop=None):
                 return None
             # One bad ticker fails the whole batch: halve until it is found.
             half = len(tickers) // 2
-            parts = [run((tickers[:half], lo, hi), stop), run((tickers[half:], lo, hi), stop)]
+            parts = [run((tickers[:half], lo, hi), stop, counts),
+                     run((tickers[half:], lo, hi), stop, counts)]
             return None if None in parts else sum(parts)
         log.warning("candle request failed (%d markets): %s", len(tickers), exc)
         return None
@@ -127,15 +131,19 @@ def run(request, stop=None):
                     len(tickers), type(exc).__name__, exc)
         return None
 
-    rows, fetched = [], []
+    rows, fetched, per = [], [], {}
     for ticker in tickers:
         if ticker not in got:
             continue                    # no answer for it: claim nothing
-        rows += _rows(ticker, got[ticker], lo, hi)
+        mine = _rows(ticker, got[ticker], lo, hi)
+        rows += mine
+        per[ticker] = len(mine)
         fetched.append((ticker, stamp(lo), stamp(hi)))
     try:
         store.write_kalshi_fetch(rows, fetched)
     except Exception as exc:
         log.warning("writing %d candles failed: %s: %s", len(rows), type(exc).__name__, exc)
         return None
+    if counts is not None:
+        counts.update(per)
     return len(rows)

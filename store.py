@@ -12,6 +12,18 @@ import db
 import paths
 from db import connection
 
+# Deleting or overwriting candles in a compressed chunk decompresses them, and
+# TimescaleDB refuses by default past 100,000 rows in one transaction: prune
+# and backfills into compressed days would fail. 0 lifts the limit for the
+# transactions that set it.
+UNLIMITED_DECOMPRESSION = "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0"
+# Every writer that touches several kalshi_tracking rows locks them first, in
+# ticker order. Two writers taking rows in the same order can only queue,
+# never deadlock (live's fetches, activity's scoring and backfill used to).
+LOCK_TRACKING = ("SELECT 1 FROM kalshi_tracking WHERE ticker = ANY(%s)"
+                 " ORDER BY ticker FOR UPDATE")
+SCHEMA_LOCK = 72405210          # pg_advisory_lock key: one schema check at a time
+
 # Per venue: where candles live, what they key on, and which table owns the key.
 VENUES = {
     "kalshi": {"table": "kalshi_candles", "key": "ticker", "dim": "kalshi_markets",
@@ -55,8 +67,26 @@ def ensure_schema():
     """Tables, then the TimescaleDB layer if the extension is installed.
 
     The Timescale part runs statement by statement outside a transaction,
-    because continuous aggregates cannot be created inside one.
+    because continuous aggregates cannot be created inside one. Programs
+    starting together (the API's worker processes) take turns.
     """
+    pool = db.get_pool()
+    holder = pool.getconn()
+    holder.autocommit = True
+    try:
+        with holder.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK,))
+        return _ensure_schema()
+    finally:
+        try:
+            with holder.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK,))
+        finally:
+            holder.autocommit = False
+            pool.putconn(holder)
+
+
+def _ensure_schema():
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(paths.SCHEMA.read_text(encoding="utf-8"))
@@ -128,7 +158,8 @@ def write_candles(venue, candles, cur=None):
            f" SELECT {select} FROM (VALUES %s) AS v({alias})"
            f" WHERE EXISTS (SELECT 1 FROM {v['dim']} d WHERE d.{v['key']} = v.k)"
            f" ON CONFLICT ({v['key']}, ts) DO UPDATE SET {sets} WHERE {changed}")
-    rows = [tuple(c[:2 + values]) for c in candles]
+    # Sorted, so concurrent writers of the same minutes take them in one order.
+    rows = sorted((tuple(c[:2 + values]) for c in candles), key=lambda r: (r[0], str(r[1])))
     if cur is not None:
         execute_values(cur, sql, rows, page_size=1000)
         return len(rows)
@@ -151,8 +182,10 @@ def write_kalshi_fetch(candles, fetched):
     """
     with connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(UNLIMITED_DECOMPRESSION)
             write_candles("kalshi", candles, cur)
             if fetched:
+                cur.execute(LOCK_TRACKING, (sorted({f[0] for f in fetched}),))
                 execute_values(cur, """
                     UPDATE kalshi_tracking t SET
                       candles_fetched_to = CASE WHEN f.lo <= t.candles_fetched_to
@@ -198,6 +231,7 @@ def prune(days):
     counts = {}
     with connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(UNLIMITED_DECOMPRESSION)
             for label, sql, dated in steps:
                 cur.execute(sql, (cutoff,) if dated else None)
                 if cur.rowcount:
