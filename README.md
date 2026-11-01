@@ -18,7 +18,7 @@ trade candles, a browser viewer and an HTTP API for Python.
 | `live.py` | one-minute candles: hot markets every minute, others as they trade | always |
 | `backfill.py` | fills history; `--report`, `--verify`, `--refetch` | always; reruns every 15 min once done |
 | `api/` | the HTTP API, 4 processes | always |
-| `viewer.py` | the browser viewer, `/api-usage` charts | always |
+| `viewer.py` | the browser viewer, `/status` charts | always |
 
 They run as systemd services, so they start on boot and restart if they crash:
 
@@ -112,8 +112,8 @@ is taken over by another process.
 - tables, filters, candle charts, manage, stats -- as before
 - on a market's page: **related wording** (title similarity, with a slider) and
   **nearby markets** (same expiry, same odds, or both)
-- **`/api-usage`**: who calls the API and what for, response times, the Kalshi
-  budget by program, backfill progress, live lag. Its history is one JSON line
+- **`/status`**: one page for everything happening now -- live ingestion,
+  backfill progress, the Kalshi budget, discovery, the database and the API. Its history is one JSON line
   a minute in `data/state/monitor/`, kept 30 days.
 
 ## Tests
@@ -146,7 +146,7 @@ ratelimit.py   the shared request budget
 catalogue.py   one venue listing -> series / events / markets rows
 venues.py      the Kalshi and Polymarket calls
 store.py       schema setup, upserts, pruning, candle writes
-monitor.py     the minute-by-minute record behind /api-usage
+monitor.py     the minute-by-minute record behind /status
 viewer.py      the browser viewer
 api/           the HTTP API; pmapi.py is its Python client
 settings.py    every tunable, read from .env (see .env.example)

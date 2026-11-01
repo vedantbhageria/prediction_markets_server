@@ -228,7 +228,7 @@
     <div class="item"><h3>activity.py <span class="pill">after each scan</span></h3><p>Turns each scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
     <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
     <div class="item"><h3>backfill.py <span class="pill warm">running</span></h3><p>Fills old history on leftover budget, reports coverage, checks candles against volumes, repairs.</p></div>
-    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login, with related-wording and nearby-market panels; <code>/api-usage</code> charts API use, the budget and the backfill.</p></div>
+    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login, with related-wording and nearby-market panels; <code>/status</code> charts API use, the budget and the backfill.</p></div>
     <div class="item"><h3>api/ <span class="pill">always on</span></h3><p>The data API for Python: markets, candles, and backfill on demand — see the API tab.</p></div>
   </div>
 </section>
@@ -703,7 +703,7 @@ GET /v1/backfill/17
       <div class="item"><h3>10 backfills a minute <span class="pill">per key</span></h3><p>Each one costs Kalshi requests, so they are capped on their own.</p></div>
       <div class="item"><h3>Keys stored hashed</h3><p>A stolen table opens nothing; a revoked key stops within a minute.</p></div>
       <div class="item"><h3>No way through to Kalshi</h3><p>Only backfill jobs reach it, on their own line of the shared budget.</p></div>
-      <div class="item"><h3>Usage page <span class="pill ok">viewer</span></h3><p><code>/api-usage</code> charts requests by caller, response times, the Kalshi budget, backfill progress and jobs.</p></div>
+      <div class="item"><h3>Usage page <span class="pill ok">viewer</span></h3><p><code>/status</code> charts requests by caller, response times, the Kalshi budget, backfill progress and jobs.</p></div>
     </div>
   </div>
 </section>
