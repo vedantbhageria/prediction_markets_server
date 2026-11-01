@@ -228,7 +228,7 @@
     <div class="item"><h3>activity.py <span class="pill">after each scan</span></h3><p>Turns each scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
     <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
     <div class="item"><h3>backfill.py <span class="pill warm">running</span></h3><p>Fills old history on leftover budget, reports coverage, checks candles against volumes, repairs.</p></div>
-    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login; <code>/api-usage</code> shows who calls the API and what for.</p></div>
+    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login, with related-wording and nearby-market panels; <code>/api-usage</code> shows API use.</p></div>
     <div class="item"><h3>api/ <span class="pill">always on</span></h3><p>The data API for Python: markets, candles, and backfill on demand — see the API tab.</p></div>
   </div>
 </section>
@@ -291,6 +291,7 @@
       <tr><td><code>kalshi_tracking</code></td><td>Per market: last volume, when it was read, activity score, and which minutes are fetched.</td></tr>
       <tr><td><code>kalshi_scans</code></td><td>One row per discovery scan, so activity.py scores each exactly once.</td></tr>
       <tr><td><code>kalshi_observations</code></td><td>Hand-off from discover to activity: each market's volume and when it was true.</td></tr>
+      <tr><td><code>kalshi_titles</code></td><td>Each distinct market title once (572k for 2.9M markets), for the related-wording search.</td></tr>
       <tr><td><code>*_5m / *_15m / *_1h</code></td><td>TimescaleDB rollups that refresh themselves and include the newest minutes.</td></tr>
     </table>
   </div>
@@ -405,6 +406,7 @@
     <li class="done">Database upgrade<span>Old layout with <code>filled</code> upgraded in place; candles kept; rollups rebuilt.</span></li>
     <li class="done" id="e2e">30-minute end-to-end run with faults<span>Crashes, a network drop, 429s, Redis loss, a half scan and slow answers: 57,303 traded minutes all exactly right — 0 missing, 0 wrong, 0 extra; budget held; busiest markets all hot.</span></li>
     <li class="done">Real Kalshi<span>13 settled markets: candle volumes add up exactly to Kalshi's own volume; 7,709 quote-only minutes dropped.</span></li>
+    <li class="done">Viewer panels<span>Related wording matches scoring every market (84 cases); expiry and odds filters exact; first load 0.5 s, slider 0.02 s.</span></li>
   </ul>
 </section>
 
@@ -420,7 +422,8 @@
     <li class="todo">Reliable internet<span>Office Wi-Fi blocks lookups and drops out; a 4G/5G router or registered network would fix it.</span></li>
     <li class="done">Fill-on-read for quiet minutes<span>The API carries the last price forward, only where every trade is known.</span></li>
     <li class="done">The API<span>Markets, candles in three formats, the backfill push, keys and limits.</span></li>
-    <li class="todo">Derived data and the viewer's panels<span>Strike, dates, related wording, nearby markets.</span></li>
+    <li class="done">Viewer panels<span>Related wording (title similarity, slider) and nearby markets by expiry or odds are back.</span></li>
+    <li class="todo">Strike <span class="pill">on hold</span><span>Whether to derive a strike from each market is still being decided.</span></li>
     <li class="todo">Backups, Polymarket<span>Polymarket is blocked on this network; its tables wait.</span></li>
   </ul>
 </section>
@@ -444,6 +447,9 @@
       <tr><td>API shaped like Alpaca</td><td>Clean request shape, Binance's interval names, Zerodha's files: everything loads into pandas.</td></tr>
       <tr><td>Fill when read</td><td>Forward fill is worked out per request, so storage stays traded minutes only.</td></tr>
       <tr><td>Intervals from 1-minute rows</td><td>Always matches what is stored, even right after a backfill; the rollups can lag 30 min.</td></tr>
+      <tr><td>Nearby: expiry and odds only</td><td>A strike depends on how a title is worded; expiry and price do not.</td></tr>
+      <tr><td>Prices worked out when read</td><td>Newest candle if newer than the listing, else the listing's last price — nothing extra stored.</td></tr>
+      <tr><td>Related wording over distinct titles</td><td>Nearest titles first, then each one's busiest market: 0.5 s instead of 6 s.</td></tr>
     </table>
   </div>
 </section>
