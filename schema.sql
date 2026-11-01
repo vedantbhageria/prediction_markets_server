@@ -224,6 +224,15 @@ CREATE INDEX IF NOT EXISTS kalshi_markets_title_trgm_idx
 CREATE INDEX IF NOT EXISTS kalshi_markets_ticker_trgm_idx
     ON kalshi_markets USING gin (ticker gin_trgm_ops);
 
+-- Each market's candle count and first and last candle, for the viewer's
+-- manage and visualise pages: counting a growing candle table on every page
+-- view made them take seconds. viewer.py refreshes it every 10 minutes.
+CREATE MATERIALIZED VIEW IF NOT EXISTS kalshi_candle_counts AS
+    SELECT ticker, count(*) AS n, min(ts) AS first_ts, max(ts) AS last_ts
+    FROM kalshi_candles GROUP BY ticker
+WITH NO DATA;
+CREATE UNIQUE INDEX IF NOT EXISTS kalshi_candle_counts_ticker_idx ON kalshi_candle_counts (ticker);
+
 -- Every distinct Kalshi market title, for the viewer's related-wording panel.
 -- A price ladder repeats one title across hundreds of markets, so there are a
 -- fifth as many titles as markets, and the GiST index walks straight to the

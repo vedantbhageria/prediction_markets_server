@@ -235,6 +235,7 @@ PAGE = """
 <header>
   <h2><a href="/" style="text-decoration:none;color:inherit">prediction_markets</a></h2>
   <span class="links">
+    <a href="/status"><b>status</b></a>
     <a href="/visualise">visualise</a>
     <a href="/stats">stats</a>
     <a href="/manage">manage</a>
@@ -652,25 +653,31 @@ def render(**kwargs):
 _COUNTS = {"at": 0.0, "rows": None}
 
 
-def table_list(ttl=10):
-    """Table names with exact row counts, cached briefly.
+# Bookkeeping, not data: the status page shows what they hold.
+HIDDEN_TABLES = ("kalshi_observations", "kalshi_scans", "kalshi_titles", "kalshi_tracking")
 
-    A real count(*) per table rather than pg_stat's n_live_tup estimate, which
-    lags badly while a load is running -- but counting eight tables costs a
-    quarter second, so the result is held for `ttl` seconds.
+
+def table_list(ttl=60):
+    """Table names with row counts, cached for `ttl` seconds.
+
+    The database's own estimates (TimescaleDB's for the candle tables): exact
+    counts meant reading every table on every page, which grows with the data.
     """
     if _COUNTS["rows"] is not None and time.monotonic() - _COUNTS["at"] < ttl:
         return _COUNTS["rows"]
-    # The API's own tables are left out: /api-usage shows what is in them.
-    names = [r["name"] for r in db.query("""
-        SELECT c.relname AS name
+    rows = [(r["name"], int(r["n"])) for r in db.query("""
+        SELECT c.relname AS name,
+               CASE WHEN h.hypertable_name IS NOT NULL
+                    THEN approximate_row_count(c.oid::regclass)
+                    ELSE GREATEST(c.reltuples, 0)::bigint END AS n
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN timescaledb_information.hypertables h
+               ON h.hypertable_schema = n.nspname AND h.hypertable_name = c.relname
         WHERE n.nspname = 'public' AND c.relkind = 'r' AND left(c.relname, 4) <> 'api_'
+          AND c.relname <> ALL(%s)
         ORDER BY c.relname
-    """)]
-    rows = [(name, db.query(f'SELECT count(*) AS n FROM "{name}"')[0]["n"])
-            for name in names]
+    """, (list(HIDDEN_TABLES),))]
     _COUNTS.update(at=time.monotonic(), rows=rows)
     return rows
 
@@ -1177,10 +1184,10 @@ HOME_PAGE = """
     <p>Both venues side by side: events, markets by sector, candles downloaded,
        and how many there would be in total.</p>
   </a>
-  <a class="card" href="/api-usage">
-    <h3>API usage</h3>
-    <p>Who is calling the API, what they ask for, errors, backfill jobs, and
-       whether collection is keeping up.</p>
+  <a class="card" href="/status">
+    <h3>Status</h3>
+    <p>Everything happening now, in one place: live ingestion, the backfill,
+       the Kalshi budget, the database and the API.</p>
   </a>
   <a class="card" href="/table/kalshi_candles?dim=category">
     <h3>Candles</h3>
@@ -1248,6 +1255,7 @@ everything without a strike. Both are in the nearby panel on a market's page.</p
 
 def _manage_rows(venue, state, category, sort, q, limit, offset=0):
     """One row per market, with its candle coverage."""
+    counts_ready()
     order = {"candles": "candles DESC NULLS LAST", "volume": "volume DESC NULLS LAST",
              "close": "closes DESC NULLS LAST", "open": "opened DESC NULLS LAST"}[sort]
     like = f"%{q}%" if q else None
@@ -1264,19 +1272,16 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
         elif state == "expired":
             cond.append("m.close_time <= now()")
         parts.append(("""
-            SELECT 'kalshi' AS venue, m.ticker AS id,
-                   COALESCE(m.raw->>'yes_sub_title', m.title) AS title, e.category,
+            SELECT 'kalshi' AS venue, m.ticker AS id, m.title, e.category,
                    m.close_time > now() AS active,
                    to_char(m.open_time, 'YYYY-MM-DD HH24:MI') AS opened,
                    to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
                    m.volume,
-                   c.n AS candles, c.lo AS first, c.hi AS last
+                   c.n AS candles, to_char(c.first_ts, 'YYYY-MM-DD HH24:MI') AS first,
+                   to_char(c.last_ts, 'YYYY-MM-DD HH24:MI') AS last
             FROM kalshi_markets m
             JOIN kalshi_events e USING (event_ticker)
-            LEFT JOIN (SELECT ticker, count(*) n,
-                              to_char(min(ts),'YYYY-MM-DD HH24:MI') lo,
-                              to_char(max(ts),'YYYY-MM-DD HH24:MI') hi
-                       FROM kalshi_candles GROUP BY ticker) c ON c.ticker = m.ticker
+            LEFT JOIN kalshi_candle_counts c ON c.ticker = m.ticker
             WHERE """ + " AND ".join(cond), a))
 
     if venue in ("both", "poly"):
@@ -1317,10 +1322,22 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
     # sort column has ties (it usually does -- volume 0, no candles).
     order += ", id"
     if limit is None:
-        return db.query(f"SELECT * FROM ({sql}) x{having} ORDER BY {order}", tuple(args))
-    args += [limit, offset]
-    return db.query(f"SELECT * FROM ({sql}) x{having} ORDER BY {order}"
-                    " LIMIT %s OFFSET %s", tuple(args))
+        rows = db.query(f"SELECT * FROM ({sql}) x{having} ORDER BY {order}", tuple(args))
+    else:
+        args += [limit, offset]
+        rows = db.query(f"SELECT * FROM ({sql}) x{having} ORDER BY {order}"
+                        " LIMIT %s OFFSET %s", tuple(args))
+    # Kalshi's short outcome name lives in the stored listing; read it only for
+    # the rows shown, not for every market the query sorted.
+    ids = [r["id"] for r in rows if r["venue"] == "kalshi"][:5000]
+    if ids:
+        names = {r["ticker"]: r["sub"] for r in db.query(
+            "SELECT ticker, raw->>'yes_sub_title' AS sub FROM kalshi_markets"
+            " WHERE ticker = ANY(%s)", (ids,))}
+        for r in rows:
+            if r["venue"] == "kalshi" and names.get(r["id"]):
+                r["title"] = names[r["id"]]
+    return rows
 
 
 @app.route("/manage")
@@ -1509,29 +1526,32 @@ def manage_purge():
     return redirect(f"/manage?msg={quote('deleted ' + (summary or 'nothing'))}")
 
 
-USAGE_PAGE = """
+STATUS_PAGE = """
 <!doctype html>
-<title>API usage</title>
-{% if refresh %}<meta http-equiv="refresh" content="10">{% endif %}
+<title>status</title>
+{% if refresh %}<meta http-equiv="refresh" content="30">{% endif %}
 <style>
  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1150px;
-        padding: 0 1rem; color: #222; line-height: 1.5; }
+        padding: 0 1rem; color: #222; background: #fff; line-height: 1.5; }
  header { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
  header h2 { margin: 0 0 6px; } header h2 a { text-decoration: none; color: inherit; }
  header .links a { font-size: 13px; margin-right: 12px; }
  .bar-nav { font-size: 13px; margin: 4px 0 14px; color: #666; }
  .bar-nav a, .bar-nav b { margin-right: 10px; }
- .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+ .jump { font-size: 13px; margin: -6px 0 14px; }
+ .jump a { margin-right: 12px; }
+ .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 10px; }
  .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; border-left-width: 4px; }
  .tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
  .tile span { color: #666; font-size: 12px; }
  .tile.good { border-left-color: #3a9a5b; } .tile.warn { border-left-color: #d9a400; }
  .tile.bad { border-left-color: #d9534f; } .tile.bad b { color: #b3261e; }
- .col { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin-top: 16px; min-width: 0; }
- .col h3 { margin: 0 0 8px; font-size: 15px; }
- .col h3 small { color: #888; font-weight: normal; font-size: 12px; margin-left: 6px; }
- .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
- .two .col { margin-top: 16px; }
+ h3.section { font-size: 17px; margin: 28px 0 0; padding-top: 14px; border-top: 2px solid #222; }
+ h3.section small { color: #888; font-weight: normal; font-size: 13px; margin-left: 8px; }
+ .col { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin-top: 12px; min-width: 0; }
+ .col h4 { margin: 0 0 8px; font-size: 14px; }
+ .col h4 small { color: #888; font-weight: normal; font-size: 12px; margin-left: 6px; }
+ .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
  svg.chart { display: block; width: 100%; height: auto; }
  .axis { display: flex; justify-content: space-between; font-size: 11px; color: #888; }
  .legend { font-size: 12px; color: #555; margin-top: 6px; }
@@ -1540,17 +1560,16 @@ USAGE_PAGE = """
  .legend i:first-child { margin-left: 0; }
  .progress { background: #eef1f5; border-radius: 6px; height: 14px; overflow: hidden; }
  .progress div { background: #2a6099; height: 100%; }
- .job { display: grid; grid-template-columns: minmax(0, 2fr) 3fr auto; gap: 10px;
-        align-items: center; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
- .job .progress { height: 10px; }
- .job .progress div.done { background: #3a9a5b; } .job .progress div.failed { background: #d9534f; }
- .hbar { display: grid; grid-template-columns: minmax(0, 2fr) 3fr 50px; gap: 8px;
-         align-items: center; font-size: 13px; padding: 2px 0; }
- .hbar a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
- .hbar .progress { height: 10px; } .hbar span { text-align: right; color: #555; }
  .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+ .job, .hbar { display: grid; gap: 8px; align-items: center; font-size: 13px; padding: 3px 0; }
+ .job { grid-template-columns: minmax(0, 2fr) 3fr auto; border-bottom: 1px solid #f0f0f0; }
+ .hbar { grid-template-columns: minmax(0, 2fr) 3fr 60px; }
+ .hbar a, .job a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .hbar .progress, .job .progress { height: 10px; }
+ .hbar span { text-align: right; color: #555; font-variant-numeric: tabular-nums; }
+ .job .progress div.done { background: #3a9a5b; } .job .progress div.failed { background: #d9534f; }
  .muted { color: #888; } .s2 { color: #1e7b34; } .s4 { color: #b06000; } .s5 { color: #b3261e; font-weight: 600; }
- details { margin-top: 16px; }
+ details { margin-top: 12px; }
  summary { cursor: pointer; font-weight: 600; font-size: 14px; }
  .scroll { overflow-x: auto; }
  table { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -1558,104 +1577,147 @@ USAGE_PAGE = """
  th:first-child, td:first-child, td.l, th.l { text-align: left; }
  th { color: #666; font-weight: normal; font-size: 12px; }
  td.wrap { white-space: normal; word-break: break-all; text-align: left; }
- .note { background: #f7f7f7; border-left: 3px solid #bbb; padding: 10px 14px; font-size: 13px; margin: 16px 0 0; }
  @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
 </style>
 
 <header>
-  <h2><a href="/">prediction_markets</a> &middot; API usage</h2>
+  <h2><a href="/">prediction_markets</a> &middot; status</h2>
   <span class="links">
-    <a href="/stats">stats</a>
     <a href="/table/kalshi_markets?dim=category">tables</a>
+    <a href="/visualise">visualise</a>
+    <a href="/stats">stats</a>
+    <a href="/manage">manage</a>
   </span>
 </header>
 <div class="bar-nav">
   window:
   {% for w in windows %}{% if w == window %}<b>{{ w }}</b>{% else %}<a href="?window={{ w }}{% if not refresh %}&refresh=off{% endif %}">{{ w }}</a>{% endif %}{% endfor %}
   &middot;
-  {% if refresh %}refreshing every 10 s &middot; <a href="?window={{ window }}&refresh=off">pause</a>
+  {% if refresh %}refreshing every 30 s &middot; <a href="?window={{ window }}&refresh=off">pause</a>
   {% else %}paused &middot; <a href="?window={{ window }}">resume</a>{% endif %}
   &middot; <span class="muted">as of {{ now }}</span>
 </div>
+<div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
 
 <div class="tiles">
   <div class="tile {{ 'bad' if c.down else 'good' }}"><b>{{ 'down' if c.down else 'up' }}</b>
     <span>Kalshi{% if c.down %} &middot; since {{ c.down }}{% endif %}</span></div>
   <div class="tile {{ 'good' if c.live and c.live.behind < 240 else 'warn' if c.live and c.live.behind < 900 else 'bad' }}">
     <b>{{ (c.live.behind|string + ' s') if c.live else '—' }}</b><span>live candles behind the clock</span></div>
-  <div class="tile"><b>{{ '{:,}'.format(c.hot.n) if c.hot else '—' }}</b><span>hot markets (every minute)</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(c.live.candles) if c.live else '—' }}</b>
+    <span>candles in live's last cycle{% if c.live %} &middot; {{ c.live.seconds }} s{% endif %}</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(c.hot.n) if c.hot else '—' }}</b><span>hot markets, fetched every minute</span></div>
   <div class="tile {{ 'warn' if c.factor and c.factor < 1 else '' }}"><b>{{ c.used_now }}<span style="font-size:14px;color:#888"> / {{ c.limit }}</span></b>
     <span>Kalshi requests last minute{% if c.factor and c.factor < 1 %} &middot; cut to {{ '%.0f'|format(100 * c.factor) }}%{% endif %}</span></div>
+  <div class="tile {{ 'good' if bf.left == 0 else '' }}"><b>{{ ('%.1f'|format(bf.pct) + '%') if bf.left is not none else '—' }}</b><span>backfill done</span></div>
+</div>
+<div class="tiles">
+  <div class="tile"><b>{{ d.size }}</b><span>database on disk</span></div>
+  <div class="tile"><b>{{ d.candles }}</b><span>candles stored</span></div>
+  <div class="tile"><b>{{ d.markets }}</b><span>markets &middot; {{ d.open }} open</span></div>
+  <div class="tile"><b>{{ d.connections }}</b><span>database connections in use</span></div>
   {% if not missing %}
   <div class="tile"><b>{{ '{:,}'.format(t.n) }}</b><span>API requests &middot; {{ window }}</span></div>
   <div class="tile {{ 'bad' if t.errors else 'good' }}"><b>{{ '{:,}'.format(t.errors) }}</b>
-    <span>errors{% if t.n %} &middot; {{ '%.1f'|format(100 * t.errors / t.n) }}%{% endif %}</span></div>
-  <div class="tile"><b>{{ ms(t.p50) }}</b><span>typical response &middot; slowest 5% {{ ms(t.p95) }}</span></div>
-  <div class="tile"><b>{{ size(t.bytes) }}</b><span>sent &middot; {{ '{:,}'.format(t.rows_sent) }} rows</span></div>
+    <span>API errors &middot; typical {{ ms(t.p50) }}</span></div>
   {% endif %}
 </div>
 
+<h3 class="section" id="live">Live ingestion <small>live.py: hot markets every minute, others once they trade</small></h3>
+<div class="two">
+  <div class="col">
+    <h4>Candles written per minute</h4>
+    {{ m.candles_chart|safe }}
+    <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  </div>
+  <div class="col">
+    <h4>Seconds behind the clock <small>about 120 s is normal</small></h4>
+    {{ m.behind_chart|safe }}
+    <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  </div>
+</div>
+
+<h3 class="section" id="backfill">Backfill <small>backfill.py: every market's history, on leftover budget</small></h3>
 <div class="col">
-  <h3>Backfill <small>history still to download</small></h3>
   {% if bf.left is not none %}
   <div class="two" style="gap:24px;align-items:center">
     <div>
-      <div class="big">{{ '%.1f'|format(bf.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">done</span></div>
+      <div class="big">{{ '%.1f'|format(bf.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">of markets have their history</span></div>
       <div class="progress"><div style="width:{{ bf.pct }}%"></div></div>
-      <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(bf.left) }} markets left
-        &middot; {{ bf.pace }}</div>
+      <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(bf.left) }} markets left &middot; {{ bf.pace|safe }}</div>
     </div>
-    <div>{{ bf.chart|safe }}</div>
+    <div><h4 style="margin:0 0 4px;font-size:13px">Markets still to fetch</h4>{{ bf.chart|safe }}</div>
   </div>
   {% else %}<span class="muted">no count yet: the first appears within ten minutes of the viewer starting</span>{% endif %}
-</div>
-
-<div class="col">
-  <h3>Kalshi request budget <small>requests per minute, by program &middot; dashed line = the limit</small></h3>
-  {{ budget.chart|safe }}
-  <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
-  <div class="legend">{% for name, colour in budget.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}
-    {% if budget.down %}<i style="background:#f6d5d4"></i>Kalshi unreachable{% endif %}</div>
-</div>
-
-<div class="col">
-  <h3>Live candles: seconds behind the clock <small>about 120 s is normal</small></h3>
-  {{ behind_chart|safe }}
+  <h4 style="margin-top:14px">Backfill requests per minute</h4>
+  {{ m.backfill_chart|safe }}
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
 </div>
 
+<h3 class="section" id="budget">Kalshi request budget <small>every program together &middot; dashed line = the limit</small></h3>
+<div class="col">
+  {{ m.budget_chart|safe }}
+  <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  <div class="legend">{% for name, colour in m.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}
+    {% if m.down %}<i style="background:#f6d5d4"></i>Kalshi unreachable{% endif %}</div>
+</div>
+
+<h3 class="section" id="discovery">Discovery and scoring <small>discover.py lists every market; activity.py scores each scan</small></h3>
+<div class="col scroll">
+  <table>
+    <tr><th>scan</th><th>started</th><th>listing took</th><th>scored</th></tr>
+    {% for s in scans %}
+    <tr><td>{{ s.scan_id }}</td><td>{{ when(s.started_at) }}</td>
+        <td>{{ s.took or 'still running' }}</td><td>{{ when(s.scored_at) if s.scored_at else '—' }}</td></tr>
+    {% else %}<tr><td colspan="4" class="muted">no scans yet</td></tr>{% endfor %}
+  </table>
+</div>
+
+<h3 class="section" id="database">Database <small>PostgreSQL with TimescaleDB</small></h3>
+<div class="two">
+  <div class="col">
+    <h4>Candles stored <small>every 10 minutes</small></h4>
+    {{ m.stored_chart|safe }}
+    <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
+  </div>
+  <div class="col">
+    <h4>Space by table</h4>
+    {% for r in d.tables %}
+    <div class="hbar"><span style="text-align:left;color:#222">{{ r.name }}</span>
+      <div class="progress"><div style="width:{{ r.pct }}%"></div></div><span>{{ r.size }}</span></div>
+    {% endfor %}
+  </div>
+</div>
+
+<h3 class="section" id="api">API <small>who calls it, and how fast it answers</small></h3>
 {% if missing %}
-<div class="note">No API requests recorded yet: the API starts writing to <code>api_requests</code>
-the first time it runs with this version.</div>
+<div class="col muted">No API requests recorded yet.</div>
 {% else %}
 <div class="col">
-  <h3>API requests <small>per {{ bucket_label }}, by caller &middot; red mark = errors in that stretch</small></h3>
+  <h4>Requests <small>per {{ bucket_label }}, by caller &middot; red mark = errors</small></h4>
   {{ calls.chart|safe }}
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
   <div class="legend">{% for name, colour in calls.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}</div>
 </div>
-
 <div class="col">
-  <h3>API response time <small>typical and slowest 5%, per {{ bucket_label }}</small></h3>
+  <h4>Response time <small>typical and slowest 5%, per {{ bucket_label }}</small></h4>
   {{ speed_chart|safe }}
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
   <div class="legend"><i style="background:#2a6099"></i>typical<i style="background:#e07b39"></i>slowest 5%</div>
 </div>
-
 <div class="two">
   <div class="col">
-    <h3>Most asked-for markets</h3>
+    <h4>Most asked-for markets</h4>
     {% for r in tickers %}
     <div class="hbar"><a href="/table/kalshi_candles?ticker={{ r.t|urlencode }}" title="{{ r.t }}">{{ r.t }}</a>
       <div class="progress"><div style="width:{{ r.pct }}%"></div></div><span>{{ '{:,}'.format(r.n) }}</span></div>
     {% else %}<span class="muted">none in this window</span>{% endfor %}
   </div>
   <div class="col">
-    <h3>Backfill jobs <small>pushed through the API, latest first</small></h3>
+    <h4>Backfill jobs <small>pushed through the API, latest first</small></h4>
     {% for j in jobs %}
     <div class="job">
-      <a href="/table/kalshi_candles?ticker={{ j.ticker|urlencode }}" title="{{ j.error or j.ticker }}"
-         style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ j.ticker }}</a>
+      <a href="/table/kalshi_candles?ticker={{ j.ticker|urlencode }}" title="{{ j.error or j.ticker }}">{{ j.ticker }}</a>
       <div class="progress"><div class="{{ j.status }}" style="width:{{ j.pct }}%"></div></div>
       <span class="{{ 's5' if j.status == 'failed' else 's2' if j.status == 'done' else '' }}">{{ j.status }}
         &middot; {{ '{:,}'.format(j.candles) }} candles</span>
@@ -1667,7 +1729,7 @@ the first time it runs with this version.</div>
 <details>
   <summary>Details: callers, endpoints, latest requests, errors</summary>
   <div class="col">
-    <h3>Who is calling</h3>
+    <h4>Who is calling</h4>
     <div class="scroll"><table>
       <tr><th>key</th><th class="l">machine / client</th><th class="l">ip</th><th>requests</th><th>errors</th><th>last</th></tr>
       {% for r in callers %}
@@ -1677,7 +1739,7 @@ the first time it runs with this version.</div>
     </table></div>
   </div>
   <div class="col">
-    <h3>Endpoints</h3>
+    <h4>Endpoints</h4>
     <div class="scroll"><table>
       <tr><th>endpoint</th><th>requests</th><th>errors</th><th>typical</th><th>slowest 5%</th><th>rows</th><th>sent</th></tr>
       {% for r in endpoints %}
@@ -1687,7 +1749,7 @@ the first time it runs with this version.</div>
     </table></div>
   </div>
   <div class="col">
-    <h3>Latest requests <small>the last 50, whatever the window</small></h3>
+    <h4>Latest requests <small>the last 50, whatever the window</small></h4>
     <div class="scroll"><table>
       <tr><th>time</th><th class="l">key</th><th class="l">request</th><th>status</th><th>ms</th><th>rows</th><th>sent</th><th class="l">client</th></tr>
       {% for r in recent %}
@@ -1700,7 +1762,7 @@ the first time it runs with this version.</div>
     </table></div>
   </div>
   <div class="col">
-    <h3>Recent errors <small>in this window</small></h3>
+    <h4>Recent errors <small>in this window</small></h4>
     <div class="scroll"><table>
       <tr><th>time</th><th class="l">request</th><th>status</th></tr>
       {% for r in errors %}
@@ -1731,10 +1793,20 @@ def _ms(value):
 
 def _size(n):
     n = float(n or 0)
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
+
+
+def _count(n):
+    """1,234 / 1.2M / 3.4B."""
+    if n is None:
+        return "—"
+    for div, suffix in ((1e9, "B"), (1e6, "M")):
+        if n >= div:
+            return f"{n / div:.1f}{suffix}"
+    return f"{n:,.0f}"
 
 
 def _when(dt):
@@ -1760,7 +1832,7 @@ def _nice(top):
     return 10 * step
 
 
-def _bars_svg(buckets, colours, limit=None, shade=None, marks=None):
+def _bars_svg(buckets, colours, limit=None, shade=None, marks=None, height=CHART_H):
     """Stacked bars. buckets: [{name: value}] oldest first; colours: [(name,
     colour)] bottom first; limit: [value] per bucket, drawn dashed; shade:
     [bool] per bucket, tinted red behind; marks: [bool] per bucket, a red
@@ -1768,21 +1840,21 @@ def _bars_svg(buckets, colours, limit=None, shade=None, marks=None):
     n = len(buckets) or 1
     top = _nice(max([sum(b.values()) for b in buckets] + [max(limit or [0])] + [0]) * 1.05)
     w = CHART_W / n
-    out = [f'<svg class="chart" viewBox="0 0 {CHART_W} {CHART_H + 14}" role="img">']
+    out = [f'<svg class="chart" viewBox="0 0 {CHART_W} {height + 14}" role="img">']
     for frac in (0.5, 1):
-        y = CHART_H - CHART_H * frac
+        y = height - height * frac
         out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eee"/>'
-                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{top * frac:,.0f}</text>')
+                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{_count(top * frac)}</text>')
     for i, b in enumerate(buckets):
         x = i * w
         if shade and shade[i]:
-            out.append(f'<rect x="{x:.2f}" y="0" width="{w:.2f}" height="{CHART_H}" fill="#f6d5d4"/>')
-        y = CHART_H
+            out.append(f'<rect x="{x:.2f}" y="0" width="{w:.2f}" height="{height}" fill="#f6d5d4"/>')
+        y = height
         for name, colour in colours:
             v = b.get(name, 0)
             if v <= 0:
                 continue
-            h = CHART_H * v / top
+            h = height * v / top
             y -= h
             out.append(f'<rect x="{x:.2f}" y="{y:.2f}" width="{max(w - 0.6, 0.4):.2f}" height="{h:.2f}"'
                        f' fill="{colour}"><title>{name}: {v:,.1f}</title></rect>')
@@ -1790,11 +1862,11 @@ def _bars_svg(buckets, colours, limit=None, shade=None, marks=None):
             out.append(f'<rect x="{x:.2f}" y="{y - 4:.2f}" width="{max(w - 0.6, 1.5):.2f}" height="3"'
                        f' fill="#d9534f"/>')
     if limit:
-        pts = " ".join(f"{i * w:.1f},{CHART_H - CHART_H * v / top:.1f} {(i + 1) * w:.1f},"
-                       f"{CHART_H - CHART_H * v / top:.1f}" for i, v in enumerate(limit))
+        pts = " ".join(f"{i * w:.1f},{height - height * v / top:.1f} {(i + 1) * w:.1f},"
+                       f"{height - height * v / top:.1f}" for i, v in enumerate(limit))
         out.append(f'<polyline points="{pts}" fill="none" stroke="#b3261e" stroke-width="1.5"'
                    f' stroke-dasharray="6 4"/>')
-    out.append(f'<line x1="0" x2="{CHART_W}" y1="{CHART_H}" y2="{CHART_H}" stroke="#ccc"/></svg>')
+    out.append(f'<line x1="0" x2="{CHART_W}" y1="{height}" y2="{height}" stroke="#ccc"/></svg>')
     return "".join(out)
 
 
@@ -1808,7 +1880,7 @@ def _lines_svg(series, height=CHART_H, unit=""):
     for frac in (0.5, 1):
         y = height - height * frac
         out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eee"/>'
-                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{top * frac:,.0f}{unit}</text>')
+                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{_count(top * frac)}{unit}</text>')
     for colour, vals in series:
         run = []
         for i, v in enumerate(vals + [None]):
@@ -1834,7 +1906,7 @@ def _caller(name, agent):
 
 
 def _collection():
-    """The same signals the API's /v1/status reads, from Redis."""
+    """What live, the hot list and the budget say right now, from Redis."""
     out = {"limit": settings.KALSHI_REQUESTS_PER_MIN, "down": None, "live": None, "hot": None,
            "factor": None, "used_now": "—"}
     try:
@@ -1846,7 +1918,9 @@ def _collection():
         live = r.get(ratelimit.KEY + "live")
         if live:
             live = json.loads(live)
-            out["live"] = {"behind": round(time.time() - live["minute"])}
+            out["live"] = {"behind": round(time.time() - live["minute"]),
+                           "candles": live["hot"]["candles"] + live["warm"]["candles"],
+                           "seconds": live["seconds"]}
         hot = r.get(ratelimit.KEY + "hot")
         if hot:
             hot = json.loads(hot)
@@ -1858,13 +1932,39 @@ def _collection():
     return out
 
 
-def _monitor_charts(starts, step, length):
-    """Budget, live lag and backfill, from monitor.py's minute files."""
+def _database():
+    """Sizes and counts, from the database's own bookkeeping: instant."""
+    def compute():
+        sizes = db.query("""
+            SELECT 'candles' AS name, hypertable_size('kalshi_candles') AS b
+            UNION ALL
+            SELECT relname, pg_total_relation_size(c.oid) FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relname IN ('kalshi_markets', 'kalshi_tracking',
+                  'kalshi_events', 'kalshi_titles', 'api_requests', 'kalshi_candle_counts')""")
+        sizes.sort(key=lambda r: -(r["b"] or 0))
+        top = max([r["b"] or 0 for r in sizes] or [1]) or 1
+        markets = db.query("SELECT GREATEST(reltuples, 0)::bigint AS n FROM pg_class"
+                           " WHERE oid = 'kalshi_markets'::regclass")[0]["n"]
+        open_now = db.query("SELECT count(*) AS n FROM kalshi_markets WHERE close_time > now()")[0]["n"]
+        return {"size": _size(db.query("SELECT pg_database_size(current_database()) AS n")[0]["n"]),
+                "candles": _count(db.query("SELECT approximate_row_count('kalshi_candles') AS n")[0]["n"]),
+                "markets": _count(markets), "open": _count(open_now),
+                "tables": [{"name": r["name"].replace("kalshi_", ""), "size": _size(r["b"]),
+                            "pct": round(100 * (r["b"] or 0) / top)} for r in sizes]}
+    d = dict(_cached(("database",), 120, compute))
+    d["connections"] = db.query("SELECT count(*) AS n FROM pg_stat_activity"
+                                " WHERE datname = current_database()")[0]["n"]
+    return d
+
+
+def _monitor_charts(starts, step):
+    """Live, backfill, budget and storage charts, from monitor.py's minute files."""
     lines = monitor.read(starts[0])
     by_bucket = {}
     for line in lines:
         by_bucket.setdefault(line["t"] // step * step, []).append(line)
-    budget, limit, down, behind = [], [], [], []
+    budget, limit, down, behind, candles, backfill = [], [], [], [], [], []
     for s in starts:
         got = by_bucket.get(s, [])
         minutes = max(len(got), 1)
@@ -1873,17 +1973,20 @@ def _monitor_charts(starts, step, length):
             for k, v in line.get("used", {}).items():
                 totals[k] = totals.get(k, 0) + v
         budget.append({k: v / minutes for k, v in totals.items()})
+        backfill.append({"backfill": totals.get("backfill", 0) / minutes})
         limit.append(max([line.get("limit", 0) * line.get("factor", 1) for line in got] or
                          [settings.KALSHI_REQUESTS_PER_MIN]))
         down.append(any(line.get("up") is False for line in got))
         lags = [line["behind"] for line in got if "behind" in line]
         behind.append(sum(lags) / len(lags) if lags else None)
+        made = [line["lc"] for line in got if "lc" in line]
+        candles.append({"live": sum(made) / len(made)} if made else {})
 
     counts = [(line["t"], line["left"]) for line in lines if "left" in line]
+    stored = [(line["t"], line["cs"]) for line in lines if "cs" in line]
     bf = {"left": None}
     if counts:
         left = counts[-1][1]
-        # The planner's row estimate: instant, and close enough for a bar.
         total = max(db.query("SELECT reltuples::bigint AS n FROM pg_class"
                              " WHERE oid = 'kalshi_tracking'::regclass")[0]["n"] or 0, left)
         recent = [c for c in counts if c[0] >= counts[-1][0] - 6 * 3600]
@@ -1899,15 +2002,23 @@ def _monitor_charts(starts, step, length):
         else:
             pace = "not moving in the last 6 h" if len(recent) > 1 else "measuring the pace"
         bf = {"left": left, "pct": max(0.0, min(100.0, 100 * (1 - left / total))) if total else 0,
-              "pace": pace,
-              "chart": _lines_svg([("#2a6099", [c[1] for c in counts])], height=90)}
-    return {"chart": _bars_svg(budget, PROGRAM_COLOURS, limit=limit, shade=down),
-            "legend": PROGRAM_COLOURS, "down": any(down)}, _lines_svg(
-        [("#2a6099", behind)], unit=" s"), bf
+              "pace": pace, "chart": _lines_svg([("#2a6099", [c[1] for c in counts])], height=90)}
+    return {"budget_chart": _bars_svg(budget, PROGRAM_COLOURS, limit=limit, shade=down),
+            "legend": PROGRAM_COLOURS, "down": any(down),
+            "behind_chart": _lines_svg([("#2a6099", behind)], unit=" s"),
+            "candles_chart": _bars_svg(candles, [("live", "#e07b39")]),
+            "backfill_chart": _bars_svg(backfill, [("backfill", "#2a6099")], height=100),
+            "stored_chart": _lines_svg([("#2a6099", [c[1] for c in stored] or [None])])}, bf
 
 
 @app.route("/api-usage")
 def api_usage():
+    """The old address of the status page."""
+    return redirect("/status" + (f"?{request.query_string.decode()}" if request.query_string else ""))
+
+
+@app.route("/status")
+def status_page():
     window = request.args.get("window", "24h")
     if window not in USAGE_WINDOWS:
         window = "24h"
@@ -1918,20 +2029,26 @@ def api_usage():
     # While the history is shorter than the window, the charts start where it
     # does instead of leaving most of their width empty (at least 12 bars).
     first = [line["t"] for line in monitor.read(starts[0])[:1]]
-    if db.query("SELECT to_regclass('api_requests') IS NOT NULL AS ok")[0]["ok"]:
+    api_table = db.query("SELECT to_regclass('api_requests') IS NOT NULL AS ok")[0]["ok"]
+    if api_table:
         at = db.query("SELECT EXTRACT(EPOCH FROM min(at)) AS t FROM api_requests"
                       " WHERE at >= to_timestamp(%s)", (starts[0],))[0]["t"]
         first += [float(at)] if at is not None else []
     if first:
         starts = starts[-max(12, len([s for s in starts if s + step > min(first)])):]
-    budget, behind_chart, bf = _monitor_charts(starts, step, length)
+    charts, bf = _monitor_charts(starts, step)
+    scans = db.query("SELECT scan_id, started_at, finished_at, scored_at FROM kalshi_scans"
+                     " ORDER BY scan_id DESC LIMIT 6")
+    for s in scans:
+        s["took"] = (f"{(s['finished_at'] - s['started_at']).total_seconds() / 60:.0f} min"
+                     if s["finished_at"] else None)
     page = dict(windows=list(USAGE_WINDOWS), window=window, refresh=refresh,
                 bucket_label=bucket_label, now=datetime.now(USAGE_TZ).strftime("%H:%M:%S"),
-                ms=_ms, size=_size, when=_when, c=_collection(), missing=False,
-                budget=budget, behind_chart=behind_chart, bf=bf,
+                ms=_ms, size=_size, when=_when, c=_collection(), d=_database(), missing=False,
+                m=charts, bf=bf, scans=scans,
                 first_label=_when(datetime.fromtimestamp(starts[0], timezone.utc)))
-    if not db.query("SELECT to_regclass('api_requests') IS NOT NULL AS ok")[0]["ok"]:
-        return render_template_string(USAGE_PAGE, **page, missing=True)
+    if not api_table:
+        return render_template_string(STATUS_PAGE, **page, missing=True)
 
     since = {"length": length, "step": step}
     where = "r.at >= now() - make_interval(secs => %(length)s)"
@@ -1941,8 +2058,6 @@ def api_usage():
                percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95,
                COALESCE(sum(bytes), 0) AS bytes, COALESCE(sum(row_count), 0) AS rows_sent
         FROM api_requests r WHERE {where}""", since)[0]
-
-    # Requests per bucket by caller, and response times.
     per = db.query(f"""
         SELECT floor(EXTRACT(EPOCH FROM r.at) / %(step)s) * %(step)s AS b, k.name, r.user_agent,
                count(*) AS n, count(*) FILTER (WHERE r.status >= 400) AS e
@@ -1976,7 +2091,6 @@ def api_usage():
     speed_chart = _lines_svg([("#2a6099", [speed[s]["p50"] if s in speed else None for s in starts]),
                               ("#e07b39", [speed[s]["p95"] if s in speed else None for s in starts])],
                              unit=" ms")
-
     tickers = db.query(f"""
         SELECT tk AS t, count(*) AS n FROM api_requests r, unnest(r.tickers) AS tk
         WHERE {where} GROUP BY tk ORDER BY n DESC LIMIT 12""", since)
@@ -1985,7 +2099,6 @@ def api_usage():
     jobs = [dict(j, pct=100 if j["status"] == "done" else
                  round(100 * j["requests_done"] / j["requests_total"]) if j["requests_total"] else 0)
             for j in db.query("SELECT * FROM api_jobs ORDER BY job_id DESC LIMIT 12")]
-
     callers = db.query(f"""
         SELECT COALESCE(k.name, '(no valid key)') AS name, r.user_agent, r.client_ip,
                count(*) AS n, count(*) FILTER (WHERE r.status >= 400) AS e, max(r.at) AS last
@@ -2007,12 +2120,54 @@ def api_usage():
     for r in recent + errs:
         r["query"] = _query(r["params"])
     return render_template_string(
-        USAGE_PAGE, **page, t=t, calls=calls, speed_chart=speed_chart, tickers=tickers,
+        STATUS_PAGE, **page, t=t, calls=calls, speed_chart=speed_chart, tickers=tickers,
         jobs=jobs, callers=callers, endpoints=endpoints, recent=recent, errors=errs)
+
+
+_cache = {}
+_cache_lock = threading.Lock()
+
+
+def _cached(key, ttl, compute):
+    """compute(), remembered for `ttl` seconds."""
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    value = compute()
+    with _cache_lock:
+        _cache[key] = (now, value)
+    return value
+
+
+def keep_fresh(stop):
+    """The slow numbers, worked out every 10 minutes in the background so no
+    page waits for them: the stats page, and each market's candle count."""
+    while not stop.is_set():
+        try:
+            with connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT ispopulated FROM pg_matviews"
+                                " WHERE matviewname = 'kalshi_candle_counts'")
+                    populated = cur.fetchone()
+                    if populated is not None:
+                        cur.execute("REFRESH MATERIALIZED VIEW"
+                                    + (" CONCURRENTLY" if populated[0] else "")
+                                    + " kalshi_candle_counts")
+            with _cache_lock:
+                _cache[("stats",)] = (time.monotonic(), _stats_data())
+        except Exception as exc:
+            print(f"background refresh failed: {type(exc).__name__}: {exc}", flush=True)
+        stop.wait(600)
 
 
 @app.route("/stats")
 def stats():
+    return render_template_string(STATS_PAGE, **_cached(("stats",), 900, _stats_data))
+
+
+def _stats_data():
     def sectors(source):
         rows = db.query(f"SELECT e.category, count(*) n FROM {source}"
                         " GROUP BY 1 ORDER BY n DESC LIMIT 12")
@@ -2042,8 +2197,7 @@ def stats():
     # Kalshi only returns a candle when the market traded or was quoted, so its
     # ceiling is discounted by roughly what the downloaded sample fills in.
     fill = 0.15
-    return render_template_string(
-        STATS_PAGE,
+    return dict(
         k=dict(k, **kc, minutes=km, fill=fill, estimate=int(km * fill),
                sectors=sectors("kalshi_markets m JOIN kalshi_events e USING (event_ticker)")),
         p=dict(p, **pc, minutes=pm, estimate=pm,
@@ -2085,8 +2239,9 @@ def build_panels(name, value, ticker, dim="", limit=200):
     source, col, _ = dim_source(name, dim)
     base = f"/table/{name}?dim={dim}"
 
-    rows = db.query(f"SELECT {col}::text AS v, count(*) n FROM {source}"
-                    f" WHERE {col} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 300")
+    rows = _cached(("panel", source, col), 300, lambda: db.query(
+        f"SELECT {col}::text AS v, count(*) n FROM {source}"
+        f" WHERE {col} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 300"))
     panels = [dict(title=dim.replace("_", " "), dims=dims, dim=dim, table=name,
                    options=[(r["v"], f"{r['n']:,}") for r in rows],
                    selected=value, url=f"{base}&asset=", all_url=base)]
@@ -2940,14 +3095,25 @@ def candle_source(ident):
     return None, None, None
 
 
+def counts_ready():
+    """Fill kalshi_candle_counts if the viewer's background refresh has not
+    yet (only right after it starts)."""
+    if _cache.get(("counts ready",)):
+        return
+    ready = db.query("SELECT ispopulated FROM pg_matviews WHERE matviewname = 'kalshi_candle_counts'")
+    if ready and not ready[0]["ispopulated"]:
+        db.execute("REFRESH MATERIALIZED VIEW kalshi_candle_counts")
+    _cache[("counts ready",)] = True
+
+
 def plottable():
     """Every market that actually has candles, for the picker and the list."""
+    counts_ready()
     return db.query("""
-        SELECT c.ticker AS id, 'kalshi' AS venue, count(*) AS n,
-               min(c.ts)::date::text AS first, max(c.ts)::date::text AS last,
-               max(m.title) AS title
-        FROM kalshi_candles c LEFT JOIN kalshi_markets m ON m.ticker = c.ticker
-        GROUP BY c.ticker
+        SELECT c.ticker AS id, 'kalshi' AS venue, c.n,
+               c.first_ts::date::text AS first, c.last_ts::date::text AS last,
+               m.title
+        FROM kalshi_candle_counts c LEFT JOIN kalshi_markets m ON m.ticker = c.ticker
         UNION ALL
         SELECT c.condition_id, 'poly', count(*),
                min(c.ts)::date::text, max(c.ts)::date::text, max(p.question)
@@ -3045,6 +3211,8 @@ if __name__ == "__main__":
     # The minute-by-minute record behind /api-usage's charts (monitor.py).
     threading.Thread(target=monitor.run, args=(threading.Event(),), daemon=True,
                      name="monitor").start()
+    threading.Thread(target=keep_fresh, args=(threading.Event(),), daemon=True,
+                     name="refresh").start()
 
     print(f"http://127.0.0.1:{args.port}")
     app.run(host=args.host, port=args.port, threaded=True)

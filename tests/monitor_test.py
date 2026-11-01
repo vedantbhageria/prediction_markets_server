@@ -145,7 +145,7 @@ def test_page():
                         "hot": 5000, **({"left": 1000 - 10 * (30 - back)} if back % 10 == 0 else {})})
     import viewer
     viewer.LOGIN_USER = None
-    page = viewer.app.test_client().get("/api-usage?window=1h&refresh=off")
+    page = viewer.app.test_client().get("/status?window=1h&refresh=off")
     text = page.get_data(as_text=True)
     check(page.status_code == 200, f"5 /api-usage renders ({page.status_code})")
     check("Kalshi request budget" in text and "stroke-dasharray" in text and "#f6d5d4" in text,

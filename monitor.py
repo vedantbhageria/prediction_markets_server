@@ -9,8 +9,10 @@
      "up": true,                            Kalshi reachable
      "behind": 118,                         live: seconds behind the clock
      "hot": 6627,                           markets on the hot list
-     "left": 771987}                        markets with history still to fetch
-                                            (every LEFT_EVERY minutes only)
+     "lc": 2471, "ls": 35.0,                live's last cycle: candles, seconds
+     "left": 771987,                        markets with history still to fetch,
+     "cs": 2069423, "db": 8771234816}       candles stored, database bytes
+                                            (these three every LEFT_EVERY minutes)
 
 About 200 bytes a minute; files older than KEEP_DAYS are deleted. The viewer
 runs run() in a thread. If it was stopped, the request counts of the minutes
@@ -69,12 +71,17 @@ def snapshot(minute, with_left=False):
     line["up"] = not r.exists(f"{settings.REDIS_PREFIX}down:{host}")
     live = r.get(ratelimit.KEY + "live")
     if live:
-        line["behind"] = round(time.time() - json.loads(live)["minute"])
+        live = json.loads(live)
+        line["behind"] = round(time.time() - live["minute"])
+        line["lc"] = live["hot"]["candles"] + live["warm"]["candles"]
+        line["ls"] = live["seconds"]
     hot = r.get(ratelimit.KEY + "hot")
     if hot:
         line["hot"] = len(json.loads(hot)["tickers"])
     if with_left:
         line["left"] = backfill_left()
+        line["cs"] = int(db.query("SELECT approximate_row_count('kalshi_candles') AS n")[0]["n"])
+        line["db"] = db.query("SELECT pg_database_size(current_database()) AS n")[0]["n"]
     return line
 
 
