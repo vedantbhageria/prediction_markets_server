@@ -232,6 +232,11 @@ def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None)
         if venue and not ratelimit.acquire(stop, venue):
             raise VenueError(f"{url}: stopped", status)
         via = via or net.route.current()
+        if venue == "poly" and method == "GET":
+            # Polymarket's answers sit in Cloudflare's cache for up to five
+            # minutes (max-age=300), each address on its own clock: a value
+            # that changes every request asks Polymarket itself instead.
+            params = dict(params or {}, _=f"{time.time():.3f}")
         try:
             response = session(via).request(method, url, params=params, json=body,
                                             timeout=timeout)
