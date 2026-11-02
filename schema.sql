@@ -196,8 +196,12 @@ CREATE INDEX IF NOT EXISTS poly_markets_end_idx ON poly_markets (end_date);
 CREATE INDEX IF NOT EXISTS poly_markets_strike_type_idx ON poly_markets (strike_type);
 CREATE INDEX IF NOT EXISTS poly_markets_stated_idx ON poly_markets (stated_date);
 
--- Polymarket publishes one price per minute, so open, high, low and close are
--- the same number, and no volume.
+-- One row per market per minute, made by aggregate.py from poly_trades: the
+-- price of the market's first outcome (its yes_token_id -- a trade in the other
+-- outcome at p counts as 1 - p), volume in shares, notional in USDC paid.
+-- source 'mid' marks the exception: history older than the 20,000 trades the
+-- venue will list for one market, filled from its per-minute order-book
+-- midpoint -- one price, no volume.
 CREATE TABLE IF NOT EXISTS poly_candles (
     condition_id  TEXT NOT NULL REFERENCES poly_markets (condition_id) ON DELETE CASCADE,
     ts            TIMESTAMPTZ NOT NULL,
@@ -208,8 +212,86 @@ CREATE TABLE IF NOT EXISTS poly_candles (
     volume        NUMERIC(20, 4),
     PRIMARY KEY (condition_id, ts)
 );
+ALTER TABLE poly_candles ADD COLUMN IF NOT EXISTS notional NUMERIC(20, 4);
+ALTER TABLE poly_candles ADD COLUMN IF NOT EXISTS trades INTEGER;
+ALTER TABLE poly_candles ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'trades';
 
 CREATE INDEX IF NOT EXISTS poly_candles_ts_idx ON poly_candles (ts);
+
+-- Every Polymarket trade, as its taker's order filled: one row per taker
+-- order, so volume is counted once. Kept for the retention window, like the
+-- markets. No foreign key: the feed carries trades for markets discovery has
+-- not listed yet, and those are kept until it does. trade_id is an md5 of the
+-- fields that tell trades apart (transaction, token, wallet, side, size,
+-- price), so a trade read twice -- feed and market list -- is stored once.
+CREATE TABLE IF NOT EXISTS poly_trades (
+    condition_id  TEXT NOT NULL,
+    ts            TIMESTAMPTZ NOT NULL,
+    trade_id      TEXT NOT NULL,
+    token_id      TEXT NOT NULL,
+    side          TEXT,
+    price         NUMERIC(12, 6) NOT NULL,
+    size          NUMERIC(20, 6) NOT NULL,
+    wallet        TEXT,
+    tx_hash       TEXT,
+    PRIMARY KEY (condition_id, ts, trade_id)
+);
+
+CREATE INDEX IF NOT EXISTS poly_trades_ts_idx ON poly_trades (ts);
+
+-- Minutes whose trades changed since aggregate.py last made their candle.
+-- Written in the same transaction as the trades, emptied as candles are made.
+CREATE TABLE IF NOT EXISTS poly_dirty (
+    condition_id  TEXT NOT NULL,
+    minute        TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (condition_id, minute)
+);
+
+-- Collection bookkeeping, one row per market, as kalshi_tracking.
+--
+--   volume, volume_24h   as last read by discovery
+--   moved_at             when a reading last found either one higher: the
+--                        market traded at some point before then
+--   history_from         where its history starts: its own start, or
+--                        BACKFILL_DAYS ago if that is later
+--   trades_from/_to      every trade in [trades_from, trades_to) is stored
+--   mid_to               [history_from, mid_to) is covered by midpoints only:
+--                        the market has more trades than the venue will list
+--
+-- Live collection does not move trades_to for every market every few seconds:
+-- the feed's own coverage is kept once, in poly_feed, and poly_covered_to()
+-- joins the two (see poly_feed).
+CREATE TABLE IF NOT EXISTS poly_tracking (
+    condition_id  TEXT PRIMARY KEY REFERENCES poly_markets (condition_id) ON DELETE CASCADE,
+    volume        NUMERIC(20, 4) NOT NULL DEFAULT 0,
+    volume_24h    NUMERIC(20, 4) NOT NULL DEFAULT 0,
+    moved_at      TIMESTAMPTZ,
+    history_from  TIMESTAMPTZ NOT NULL,
+    trades_from   TIMESTAMPTZ NOT NULL,
+    trades_to     TIMESTAMPTZ NOT NULL,
+    mid_to        TIMESTAMPTZ
+) WITH (fillfactor = 70);
+
+-- The feed of every Polymarket trade, as trades.py has read it: every trade
+-- in [covered_from, covered_to) is stored, whatever its market. One row. When
+-- the feed has to start again after a gap, every market it was covering has
+-- its trades_to moved up to the old covered_to first, so nothing is lost.
+CREATE TABLE IF NOT EXISTS poly_feed (
+    id            BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+    covered_from  TIMESTAMPTZ NOT NULL,
+    covered_to    TIMESTAMPTZ NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A market's real trades_to: its own, or the feed's if the feed took over
+-- from it without a gap.
+CREATE OR REPLACE FUNCTION poly_covered_to(own TIMESTAMPTZ) RETURNS TIMESTAMPTZ
+LANGUAGE sql STABLE AS $$
+    SELECT CASE WHEN f.covered_from IS NOT NULL AND own >= f.covered_from
+                THEN GREATEST(own, f.covered_to) ELSE own END
+    FROM (SELECT (SELECT covered_from FROM poly_feed) AS covered_from,
+                 (SELECT covered_to FROM poly_feed) AS covered_to) f
+$$;
 
 
 -- ---------------------------------------------------------------------------

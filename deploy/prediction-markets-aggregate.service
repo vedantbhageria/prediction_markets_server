@@ -1,0 +1,28 @@
+# prediction_markets polymarket candles. One-minute candles made from the stored Polymarket trades.
+#
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-aggregate
+#   tail -f ~/logs/aggregate.log
+#   sudo systemctl restart prediction-markets-aggregate
+
+[Unit]
+Description=prediction_markets polymarket candles
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python aggregate.py
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/theonealpha/logs/aggregate.log
+StandardError=append:/home/theonealpha/logs/aggregate.log
+
+[Install]
+WantedBy=multi-user.target

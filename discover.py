@@ -27,7 +27,12 @@ up where the last run stopped:
 
 Each pass is also a Kalshi scan: a row in kalshi_scans, and every market's
 volume as read, in kalshi_observations. activity.py scores it once it is done.
-Discovery never waits for that.
+Discovery never waits for that. Polymarket volumes go straight into
+poly_tracking (see catalogue._track_poly).
+
+The venues are read side by side, each in its own thread: Polymarket lists
+some 200,000 markets and takes the best part of a pass to read, and Kalshi's
+scans must not wait for it.
 """
 
 import argparse
@@ -58,11 +63,25 @@ def load_state():
         return {}
 
 
+_save_lock = threading.Lock()
+
+
 def save_state(state):
-    """Write atomically, so a crash mid-write never leaves a broken file."""
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
-    os.replace(tmp, STATE_FILE)
+    """Write atomically, so a crash mid-write never leaves a broken file.
+    The venues' threads share the state: one writes at a time, and a dump
+    caught mid-change by the other thread is simply taken again."""
+    with _save_lock:
+        for _ in range(5):
+            try:
+                text = json.dumps(state, indent=1)
+                break
+            except RuntimeError:
+                time.sleep(0.01)
+        else:
+            return
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, STATE_FILE)
 
 
 def _window_start(now):
@@ -144,7 +163,6 @@ def _open_job(venue, state):
 
 def run_pass(stop, state, prune=True):
     now = time.time()
-    scan = None
     if "kalshi" in settings.VENUES and now - state.get("series_synced_at", 0) > 86400:
         try:
             n = catalogue.sync_series()
@@ -154,40 +172,20 @@ def run_pass(stop, state, prune=True):
         except Exception as exc:
             log.warning("kalshi: series sync failed: %s: %s", type(exc).__name__, exc)
 
-    for venue in settings.VENUES:
-        if stop.is_set():
-            return
-        started = time.time()
-        job = _open_job(venue, state)
-        if venue == "kalshi":
-            scan = job["scan"]
-        try:
-            if venue == "kalshi":
-                n = catalogue.SYNC[venue](stop, scan=scan, progress=job,
-                                          checkpoint=lambda: save_state(state))
-            else:
-                n = catalogue.SYNC[venue](stop)
-            if stop.is_set():
-                return
-            v = state[venue]
-            v["open_synced_at"] = job["started"]
-            v.pop("open_sync", None)
-            save_state(state)
-            log.info("%s: open markets synced, %s rows written, %.0fs",
-                     venue, f"{n:,}", time.time() - started)
-        except Exception as exc:
-            # The job stays saved: the next pass carries on from its last page.
-            log.warning("%s: open sync failed: %s: %s", venue, type(exc).__name__, exc)
-        if stop.is_set():
-            return
-        try:
-            _closed_import(venue, state, stop, scan)
-        except Exception as exc:
-            log.warning("%s: closed import failed: %s: %s", venue, type(exc).__name__, exc)
+    scans = {}
+    threads = [threading.Thread(target=_venue_pass, args=(venue, stop, state, scans),
+                                name=f"discover-{venue}") for venue in settings.VENUES]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if stop.is_set():
+        return
+    scan = scans.get("kalshi")
 
     # A scan whose open sync has not finished stays open, so the next pass
     # can complete it instead of starting another.
-    if scan is not None and not stop.is_set() and "open_sync" not in state.get("kalshi", {}):
+    if scan is not None and "open_sync" not in state.get("kalshi", {}):
         _scan_finished(scan)
 
     if prune and settings.MARKET_RETENTION_DAYS > 0 and not stop.is_set():
@@ -197,6 +195,40 @@ def run_pass(stop, state, prune=True):
                      if dropped else "nothing")
         except Exception as exc:
             log.warning("prune failed: %s: %s", type(exc).__name__, exc)
+
+
+def _venue_pass(venue, stop, state, scans):
+    """One venue's part of a pass: the open sync, then the closed import."""
+    if stop.is_set():
+        return
+    scan = None
+    started = time.time()
+    job = _open_job(venue, state)
+    if venue == "kalshi":
+        scan = scans["kalshi"] = job["scan"]
+    try:
+        if venue == "kalshi":
+            n = catalogue.SYNC[venue](stop, scan=scan, progress=job,
+                                      checkpoint=lambda: save_state(state))
+        else:
+            n = catalogue.SYNC[venue](stop)
+        if stop.is_set():
+            return
+        v = state[venue]
+        v["open_synced_at"] = job["started"]
+        v.pop("open_sync", None)
+        save_state(state)
+        log.info("%s: open markets synced, %s rows written, %.0fs",
+                 venue, f"{n:,}", time.time() - started)
+    except Exception as exc:
+        # The job stays saved: the next pass carries on from its last page.
+        log.warning("%s: open sync failed: %s: %s", venue, type(exc).__name__, exc)
+    if stop.is_set():
+        return
+    try:
+        _closed_import(venue, state, stop, scan)
+    except Exception as exc:
+        log.warning("%s: closed import failed: %s: %s", venue, type(exc).__name__, exc)
 
 
 def run(stop, prune=True, after_pass=None):

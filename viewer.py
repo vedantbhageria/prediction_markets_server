@@ -29,6 +29,7 @@ import monitor
 import paths
 from db import connection
 import fetch as candle_fetch
+import poly
 import ratelimit
 import settings
 
@@ -1598,7 +1599,7 @@ STATUS_PAGE = """
   {% else %}paused &middot; <a href="?window={{ window }}">resume</a>{% endif %}
   &middot; <span class="muted">as of {{ now }}</span>
 </div>
-<div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
+<div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#poly">Polymarket</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
 
 <div class="tiles">
   <div class="tile {{ 'bad' if c.down else 'good' }}"><b>{{ 'down' if c.down else 'up' }}</b>
@@ -1661,6 +1662,26 @@ STATUS_PAGE = """
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
   <div class="legend">{% for name, colour in m.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}
     {% if m.down %}<i style="background:#f6d5d4"></i>Kalshi unreachable{% endif %}</div>
+</div>
+
+<h3 class="section" id="poly">Polymarket <small>trades.py reads every trade; aggregate.py makes the candles</small></h3>
+<div class="tiles">
+  <div class="tile {{ 'bad' if p.down else 'good' }}"><b>{{ 'down' if p.down else 'up' }}</b>
+    <span>Polymarket &middot; {{ 'through the VPN' if p.route == 'vpn' else 'direct' }}</span></div>
+  <div class="tile {{ 'good' if p.behind is not none and p.behind < 600 else 'warn' if p.behind is not none and p.behind < 1800 else 'bad' if p.behind is not none else '' }}">
+    <b>{{ (p.behind|string + ' s') if p.behind is not none else '—' }}</b><span>trade feed behind the clock &middot; the venue itself runs 2–6 min behind</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(p.recent) if p.recent is not none else '—' }}</b><span>trades stored in the last 5 min</span></div>
+  <div class="tile {{ 'warn' if p.behind_markets else '' }}"><b>{{ '{:,}'.format(p.behind_markets) if p.behind_markets is not none else '—' }}</b><span>markets to catch up after a gap</span></div>
+  <div class="tile {{ 'warn' if p.waiting and p.waiting > 5000 else '' }}"><b>{{ '{:,}'.format(p.waiting) if p.waiting is not none else '—' }}</b><span>minutes waiting for their candle</span></div>
+  <div class="tile"><b>{{ p.used }}<span style="font-size:14px;color:#888"> / {{ p.limit }}</span></b><span>Polymarket requests last minute</span></div>
+</div>
+<div class="col">
+  {% if p.tracked %}
+  <div class="big">{{ '%.1f'|format(p.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">of Polymarket markets have their history</span></div>
+  <div class="progress"><div style="width:{{ p.pct }}%"></div></div>
+  <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(p.left) }} markets left, about one request each &middot;
+    {{ '{:,}'.format(p.mid) }} partly from midpoints &middot; {{ p.trades }} trades stored</div>
+  {% else %}<span class="muted">no Polymarket markets tracked yet: discovery adds them on its next pass</span>{% endif %}
 </div>
 
 <h3 class="section" id="discovery">Discovery and scoring <small>discover.py lists every market; activity.py scores each scan</small></h3>
@@ -1933,6 +1954,44 @@ def _collection():
     return out
 
 
+def _poly():
+    """Polymarket's side, from Redis and the bookkeeping tables."""
+    out = {"down": None, "route": None, "behind": None, "recent": None, "behind_markets": None,
+           "waiting": None, "used": "—", "limit": settings.POLY_REQUESTS_PER_MIN, "tracked": 0}
+    try:
+        r = ratelimit.client()
+        out["down"] = r.get(f"{settings.REDIS_PREFIX}down:data-api.polymarket.com")
+        out["route"] = r.get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com") or (
+            "vpn" if settings.VPN_PROXY else "direct")
+        out["used"] = sum(ratelimit.used(s, 1, "poly") or 0 for s in ratelimit.SHARE)
+    except Exception:
+        pass
+    try:
+        now = db.query("""
+            SELECT EXTRACT(EPOCH FROM now() - (SELECT covered_to FROM poly_feed)) AS behind,
+                   (SELECT count(*) FROM poly_trades WHERE ts > now() - interval '5 minutes') AS recent,
+                   (SELECT count(*) FROM poly_dirty) AS waiting""")[0]
+        out.update(behind=None if now["behind"] is None else round(now["behind"]),
+                   recent=now["recent"], waiting=now["waiting"])
+
+        def counts():
+            c = db.query(f"""
+                SELECT count(*) AS tracked,
+                       count(*) FILTER (WHERE {poly.HISTORY_DONE}) AS done,
+                       count(*) FILTER (WHERE t.mid_to IS NOT NULL) AS mid,
+                       count(*) FILTER (WHERE {poly.HISTORY_DONE} AND {poly.BEHIND}) AS behind
+                FROM poly_tracking t""")[0]
+            c["trades"] = _count(db.query("SELECT approximate_row_count('poly_trades') AS n")[0]["n"])
+            return c
+        c = _cached(("poly counts",), 120, counts)
+        out.update(tracked=c["tracked"], left=c["tracked"] - c["done"], mid=c["mid"],
+                   behind_markets=c["behind"], trades=c["trades"],
+                   pct=100 * c["done"] / c["tracked"] if c["tracked"] else 0)
+    except Exception:
+        pass
+    return out
+
+
 def _database():
     """Sizes and counts, from the database's own bookkeeping: instant."""
     def compute():
@@ -1942,7 +2001,12 @@ def _database():
             SELECT relname, pg_total_relation_size(c.oid) FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public' AND c.relname IN ('kalshi_markets', 'kalshi_tracking',
-                  'kalshi_events', 'kalshi_titles', 'api_requests', 'kalshi_candle_counts')""")
+                  'kalshi_events', 'kalshi_titles', 'api_requests', 'kalshi_candle_counts',
+                  'poly_markets', 'poly_tracking')
+            UNION ALL
+            SELECT 'poly trades', hypertable_size('poly_trades')
+            UNION ALL
+            SELECT 'poly candles', hypertable_size('poly_candles')""")
         sizes.sort(key=lambda r: -(r["b"] or 0))
         top = max([r["b"] or 0 for r in sizes] or [1]) or 1
         markets = db.query("SELECT GREATEST(reltuples, 0)::bigint AS n FROM pg_class"
@@ -2045,7 +2109,8 @@ def status_page():
                      if s["finished_at"] else None)
     page = dict(windows=list(USAGE_WINDOWS), window=window, refresh=refresh,
                 bucket_label=bucket_label, now=datetime.now(USAGE_TZ).strftime("%H:%M:%S"),
-                ms=_ms, size=_size, when=_when, c=_collection(), d=_database(), missing=False,
+                ms=_ms, size=_size, when=_when, c=_collection(), d=_database(), p=_poly(),
+                missing=False,
                 m=charts, bf=bf, scans=scans,
                 first_label=_when(datetime.fromtimestamp(starts[0], timezone.utc)))
     if not api_table:

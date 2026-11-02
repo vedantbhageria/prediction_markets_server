@@ -1,5 +1,5 @@
 #!/bin/bash
-# Move the six programs from tmux sessions to systemd services, so they start
+# Move the eight programs from tmux sessions to systemd services, so they start
 # when the server boots and restart by themselves if they crash.
 #
 #   sudo bash deploy/install-services.sh            # install and start
@@ -12,7 +12,7 @@ set -euo pipefail
 
 USER_NAME=theonealpha
 APP=/home/$USER_NAME/prediction_markets_server
-PROGRAMS="discover activity live backfill api viewer"
+PROGRAMS="discover activity live trades aggregate backfill api viewer"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "run it with sudo: sudo bash deploy/install-services.sh" >&2
@@ -30,12 +30,12 @@ mkdir -p /home/$USER_NAME/logs
 chown $USER_NAME: /home/$USER_NAME/logs
 
 echo "stopping the tmux copies (each finishes what it is doing first)..."
-for name in discover activity live backfill viewer; do
+for name in discover activity live trades aggregate backfill viewer; do
     pkill -INT -u $USER_NAME -f "^.venv/bin/python $name.py" || true
 done
 pkill -INT -u $USER_NAME -f "^.venv/bin/uvicorn api.main:app" || true
 for i in $(seq 1 90); do
-    pgrep -u $USER_NAME -f "^.venv/bin/(python (discover|activity|live|backfill|viewer).py|uvicorn api.main:app)" \
+    pgrep -u $USER_NAME -f "^.venv/bin/(python (discover|activity|live|trades|aggregate|backfill|viewer).py|uvicorn api.main:app)" \
         > /dev/null || break
     sleep 1
 done

@@ -25,6 +25,15 @@ REDIS_PREFIX = os.environ.get("REDIS_PREFIX", "pm:")   # tests use their own
 # While a venue cannot be reached, every request to it waits and one check
 # tries to connect this often; the moment it works they all carry on.
 NET_PROBE_SECONDS = _num("NET_PROBE_SECONDS", 30, float)
+# A proxy (Cloudflare WARP in proxy mode: socks5h://127.0.0.1:40000) that
+# requests to these hosts go through by preference. If it cannot connect they
+# go direct, and try it again after VPN_RETRY_SECONDS; if the direct line
+# fails they try it. Empty = always direct. Kalshi is not on the list by
+# default: it answers 403 to WARP's addresses.
+VPN_PROXY = os.environ.get("VPN_PROXY", "").strip()
+VPN_HOSTS = _list("VPN_HOSTS") or ["gamma-api.polymarket.com", "clob.polymarket.com",
+                                   "data-api.polymarket.com"]
+VPN_RETRY_SECONDS = _num("VPN_RETRY_SECONDS", 300, float)
 
 # --- markets store ----------------------------------------------------------
 # The store holds markets that are still running or closed within this many
@@ -66,3 +75,31 @@ FETCH_WORKERS = _num("LIVE_FETCH_WORKERS", 4)
 
 # --- backfill ----------------------------------------------------------------
 BACKFILL_DAYS = _num("BACKFILL_DAYS", 30)
+
+# --- Polymarket ----------------------------------------------------------------
+# Its own budget, shared the same way as Kalshi's: every Polymarket request
+# from every program. Polymarket publishes far higher limits; this stays well
+# inside them, and a 429 halves it as on Kalshi.
+POLY_REQUESTS_PER_MIN = _num("POLY_REQUESTS_PER_MIN", 300)
+POLY_MAX_PER_SECOND = _num("POLY_MAX_PER_SECOND", 8, float)
+# trades.py reads the feed of every trade on Polymarket this often. The feed
+# reaches back 10,000 trades (about ten minutes); a longer gap is caught up
+# market by market.
+POLY_FEED_SECONDS = _num("POLY_FEED_SECONDS", 15, float)
+# A trade can reach the feed a little after it happened: coverage is claimed
+# only up to this long before each read.
+POLY_FEED_LAG = _num("POLY_FEED_LAG_SECONDS", 30)
+# A market's own trade list is trusted up to this long before it was asked:
+# longer than the stalest copy of the venue seen (about six and a half
+# minutes). A market that has not traded lately says nothing about the age of
+# the copy that answered.
+POLY_LIST_LAG = _num("POLY_LIST_LAG_SECONDS", 900)
+# How the trade lists are read: (offset, limit) steps, newest first. The venue
+# refuses an offset past 10,000 or a page over 10,000, so these reach the
+# newest 20,000 trades; tests shrink them to make gaps quickly.
+POLY_PAGES = [tuple(int(x) for x in step.split(":")) for step in _list("POLY_PAGES")] or [
+    (0, 1000), (1000, 1000), (2000, 1000), (3000, 7000), (10_000, 10_000)]
+# Where Polymarket is (the tests point these at a simulated one).
+POLY_GAMMA_URL = os.environ.get("POLY_GAMMA_URL", "").strip() or "https://gamma-api.polymarket.com"
+POLY_CLOB_URL = os.environ.get("POLY_CLOB_URL", "").strip() or "https://clob.polymarket.com"
+POLY_DATA_URL = os.environ.get("POLY_DATA_URL", "").strip() or "https://data-api.polymarket.com"

@@ -16,6 +16,13 @@ parquet (smaller, and the column types arrive intact).
     job = pm.backfill("KXBTCD-26NOV0117-T70000")      # download it again, now
     pm.wait(job)                                      # ...and wait until done
 
+Polymarket too, through the same calls: its markets are named by condition id
+(0x...), and lists of markets take venue="poly" (or "all").
+
+    pm.markets(venue="poly", q="election", status="open")
+    pm.candles("0x5f6e...", "5m")                     # made from every trade
+    pm.trades("0x5f6e...", start="2026-11-01")        # each trade, with wallet
+
 Every list is fetched page by page until it ends (or `max_rows`), so a call
 returns everything it asked for. Times can be strings, datetimes, pandas
 Timestamps or Unix seconds; naive ones are taken as UTC.
@@ -216,6 +223,16 @@ class Client:
         """One column per ticker, indexed by ts: ready to compare or correlate."""
         df = self.candles(list(_tickers(tickers)), interval, start, end, fill)
         return df.pivot(index="ts", columns="ticker", values=field)
+
+    def trades(self, condition_id, start=None, end=None, max_rows=None):
+        """Every stored trade of one Polymarket market, oldest first: price in
+        the token traded and as the first outcome's price (yes_price), size
+        in shares, notional in USDC, the taker's wallet and the transaction."""
+        df = self._pages(f"/v1/markets/{condition_id}/trades", "trades", max_rows,
+                         start=_time(start), end=_time(end), limit=10_000)[0]
+        if "ts" in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        return df
 
     def latest(self, tickers):
         """One ticker: a dict with its last trade. A list: a DataFrame."""

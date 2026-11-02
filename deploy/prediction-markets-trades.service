@@ -1,0 +1,28 @@
+# prediction_markets polymarket trades. Every Polymarket trade: the feed every 15 seconds, gaps caught up market by market.
+#
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-trades
+#   tail -f ~/logs/trades.log
+#   sudo systemctl restart prediction-markets-trades
+
+[Unit]
+Description=prediction_markets polymarket trades
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python trades.py
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/theonealpha/logs/trades.log
+StandardError=append:/home/theonealpha/logs/trades.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,5 @@
-"""History and repairs for Kalshi candles. Run by hand; stop and restart freely.
+"""History and repairs for Kalshi candles and Polymarket trades. Run by hand
+or as the backfill service; stop and restart freely.
 
     python backfill.py                      # fill every market's history
     python backfill.py --report             # coverage summary, no downloads
@@ -18,6 +19,18 @@ Markets that have never traded need no requests at all.
 
 Every request uses the shared budget at the lowest priority, so this can run
 alongside discover.py and live.py without ever pushing the total over it.
+
+Polymarket (--venue poly, or both with --venue all): a market's history is its
+trade list, read once, newest first, back to its start -- one request for all
+but the busiest. The venue lists at most ~20,000 trades per market; for the
+few with more, the time before the oldest it lists is filled from the
+per-minute order-book midpoint (candles marked source 'mid'). The markets
+take the same selection options, by condition id (--ticker), event id
+(--event) and --open / --closed; --series and --category are Kalshi's only.
+
+    python backfill.py --venue poly                 # Polymarket history
+    python backfill.py --venue poly --report
+    python backfill.py --venue poly --verify        # re-read markets, compare trades
 """
 
 import argparse
@@ -31,6 +44,7 @@ from datetime import datetime, timezone
 
 import db
 import fetch
+import poly
 import ratelimit
 import settings
 
@@ -284,10 +298,148 @@ def report(cond, params):
     print(f"candles stored        {candles:>12,}")
 
 
+# ---------------------------------------------------------------------------
+# Polymarket
+# ---------------------------------------------------------------------------
+
+def poly_selection(args):
+    where, params = [], []
+    if args.ticker:
+        where.append("m.condition_id = ANY(%s)")
+        params.append(args.ticker)
+    if args.event:
+        where.append("m.event_id = ANY(%s)")
+        params.append(args.event)
+    if args.open:
+        where.append("m.closed IS NOT TRUE")
+    if args.closed:
+        where.append("m.closed IS TRUE")
+    return (" AND ".join(where) or "true"), params
+
+
+def poly_history(cond, params, stop, limit=None, dry_run=False):
+    """Read every selected market's history, busiest first."""
+    marked = 0 if dry_run else poly.mark_untraded(cond, params)
+    if marked:
+        log.info("poly: %s markets never traded: history complete without a request",
+                 f"{marked:,}")
+    started, done, failed_ids = time.time(), 0, set()
+    totals = {"markets": 0, "failed": 0, "trades": 0, "cut off": 0, "mid candles": 0}
+
+    def one(cid):
+        with ratelimit.using("backfill"):
+            if stop.is_set():
+                return cid, None, None
+            got = poly.fetch_market(cid, stop)
+            mid = None
+            if got is not None and not got[1]:
+                mid = poly.fill_mid(cid, stop)
+            return cid, got, mid
+
+    with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="backfill") as pool:
+        while not stop.is_set():
+            size = ROUND if limit is None else min(ROUND, limit - done)
+            if size <= 0:
+                break
+            todo = [c for c in poly.history_todo(size + len(failed_ids), cond, params)
+                    if c not in failed_ids][:size]
+            if not todo:
+                break
+            if dry_run:
+                print(f"next round: {len(todo):,} Polymarket markets, about {len(todo):,} requests")
+                return
+            round_trades = round_failed = 0
+            for cid, got, mid in pool.map(one, todo):
+                if got is None:
+                    failed_ids.add(cid)
+                    round_failed += 1
+                    continue
+                round_trades += got[0]
+                totals["cut off"] += not got[1]
+                totals["mid candles"] += mid or 0
+            done += len(todo)
+            totals["markets"] += len(todo) - round_failed
+            totals["failed"] += round_failed
+            totals["trades"] += round_trades
+            log.info("poly round: %s markets (%s failed), %s new trades; %s markets so far, %.0f min",
+                     f"{len(todo):,}", f"{round_failed:,}", f"{round_trades:,}",
+                     f"{totals['markets']:,}", (time.time() - started) / 60)
+    log.info("poly history: %s", ", ".join(f"{v:,} {k}" for k, v in totals.items()))
+
+
+def poly_report(cond, params):
+    r = db.query(f"""
+        SELECT count(*) AS markets, count(t.condition_id) AS tracked,
+               count(*) FILTER (WHERE t.condition_id IS NOT NULL AND {poly.HISTORY_DONE}) AS done,
+               count(*) FILTER (WHERE t.condition_id IS NOT NULL AND NOT {poly.TRADED}) AS never,
+               count(*) FILTER (WHERE t.mid_to IS NOT NULL) AS mid,
+               count(*) FILTER (WHERE t.condition_id IS NOT NULL AND {poly.HISTORY_DONE}
+                                AND {poly.BEHIND}) AS behind
+        FROM poly_markets m LEFT JOIN poly_tracking t USING (condition_id)
+        WHERE {cond}""", params)[0]
+    feed = db.query("SELECT covered_from, covered_to, now() - covered_to AS lag FROM poly_feed")
+    print(f"markets               {r['markets']:>12,}")
+    print(f"  tracked             {r['tracked']:>12,}")
+    print(f"  never traded        {r['never']:>12,}")
+    print(f"  history complete    {r['done']:>12,}   ({r['mid']:,} partly from midpoints)")
+    print(f"  history to fetch    {r['tracked'] - r['done']:>12,}   markets, about one request each")
+    print(f"  behind the present  {r['behind']:>12,}   (traded in a feed gap; trades.py catches up)")
+    if feed:
+        f = feed[0]
+        print(f"feed covers           {f['covered_from']:%Y-%m-%d %H:%M} .. {f['covered_to']:%H:%M:%S}"
+              f"  ({f['lag'].total_seconds():.0f}s behind)")
+    else:
+        print("feed                  not started (trades.py)")
+    n = db.query("SELECT (SELECT count(*) FROM poly_trades) AS t, (SELECT count(*) FROM poly_candles) AS c,"
+                 " (SELECT count(*) FROM poly_dirty) AS d")[0]
+    print(f"trades stored         {n['t']:>12,}")
+    print(f"candles stored        {n['c']:>12,}   ({n['d']:,} minutes waiting for aggregate.py)")
+
+
+def poly_verify(cond, params, limit, repair):
+    """Read sample markets' trade lists again and compare with what is stored
+    for the time their coverage claims. Markets whose whole covered life the
+    venue still lists are compared trade for trade; any trade the venue lists
+    that is missing here is a failure. With `repair`, missing trades are
+    stored (and their candles remade by aggregate.py)."""
+    rows = db.query(f"""
+        SELECT t.condition_id, EXTRACT(EPOCH FROM t.trades_from) AS a,
+               EXTRACT(EPOCH FROM poly_covered_to(t.trades_to)) AS b
+        FROM poly_tracking t JOIN poly_markets m USING (condition_id)
+        WHERE {cond} AND {poly.HISTORY_DONE} AND t.volume_24h > 0
+        ORDER BY random() LIMIT %s""", params + [limit])
+    checked = bad = missing_total = 0
+    for r in rows:
+        a, b = float(r["a"]), float(r["b"]) - 60
+        trades, whole = poly.read_market(r["condition_id"], a)
+        listed = {x[2]: x for x in map(poly.row, trades)
+                  if x is not None and a <= x[1].timestamp() < b}
+        if not whole:
+            oldest = min(int(x["timestamp"]) for x in trades)
+            a = max(a, oldest + 1)
+            listed = {k: v for k, v in listed.items() if v[1].timestamp() >= a}
+        stored = {x["trade_id"] for x in db.query(
+            "SELECT trade_id FROM poly_trades WHERE condition_id = %s"
+            " AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)", (r["condition_id"], a, b))}
+        missing = [k for k in listed if k not in stored]
+        checked += 1
+        if missing:
+            bad += 1
+            missing_total += len(missing)
+            print(f"  {r['condition_id']}: {len(missing)} of {len(listed)} listed trades missing")
+            if repair:
+                with db.cursor(dict_rows=False) as cur:
+                    poly.write_trades(cur, [x for x in trades if poly.row(x) and poly.row(x)[2] in missing])
+    print(f"checked {checked:,} markets: {checked - bad:,} match, {bad:,} do not"
+          f" ({missing_total:,} trades missing{', stored now' if repair and missing_total else ''})")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Kalshi candle history and repairs.",
+    parser = argparse.ArgumentParser(description="Kalshi candle and Polymarket trade history.",
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog=__doc__.split("Which markets")[0])
+    parser.add_argument("--venue", choices=["kalshi", "poly", "all"], default="kalshi",
+                        help="which venue (default kalshi)")
     parser.add_argument("--ticker", nargs="+")
     parser.add_argument("--event", nargs="+")
     parser.add_argument("--series", nargs="+")
@@ -314,6 +466,18 @@ def main():
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
+    if args.venue in ("poly", "all"):
+        pcond, pparams = poly_selection(args)
+        if args.report:
+            poly_report(pcond, pparams)
+        elif args.verify:
+            poly_verify(pcond, pparams, args.limit or 200, args.repair)
+        elif args.refetch:
+            sys.exit("--refetch is Kalshi's; for Polymarket use --verify --repair")
+        elif args.venue == "poly":
+            poly_history(pcond, pparams, stop, args.limit, args.dry_run)
+        if args.venue == "poly":
+            return
     cond, params = selection(args)
 
     if args.report:
@@ -328,6 +492,14 @@ def main():
             sys.exit("--refetch needs --from (and optionally --to)")
         until = parse_day(args.until) if args.until else int(time.time())
         refetch(cond, params, fetch.minute(parse_day(args.since)), ceil_minute(until), stop)
+    elif args.venue == "all":
+        # Both histories side by side: each venue has its own budget.
+        other = threading.Thread(target=poly_history, args=(*poly_selection(args), stop,
+                                                            args.limit, args.dry_run),
+                                 name="poly-history")
+        other.start()
+        fill_history(cond, params, stop, args.limit, args.dry_run)
+        other.join()
     else:
         fill_history(cond, params, stop, args.limit, args.dry_run)
 

@@ -12,6 +12,11 @@ them together, so jobs pushed together share requests (100 markets each)
 instead of one request per market. While it runs them it renews their
 heartbeat; a running job whose heartbeat goes stale -- its process died -- is
 taken over by any worker and run from the start (fetching is idempotent).
+
+A Polymarket market (a condition id, 0x...) is backfilled by reading its whole
+trade list again (poly.fetch_market): one request for all but the busiest,
+on Polymarket's budget. Its `candles` count is the trades that were new;
+aggregate.py makes the candles from them within seconds.
 """
 
 import logging
@@ -23,6 +28,7 @@ from psycopg2.extras import execute_values
 
 import db
 import fetch
+import poly
 import ratelimit
 import settings
 from api import config
@@ -62,9 +68,19 @@ def describe(job):
             "candles": job["candles"], "error": job["error"]}
 
 
+def is_poly(ticker):
+    return ticker.startswith("0x")
+
+
 def enqueue(key_id, ticker, start, end):
-    rows = db.query("SELECT open_time, close_time FROM kalshi_markets WHERE ticker = %s",
-                    (ticker,))
+    if is_poly(ticker):
+        rows = db.query("""SELECT t.history_from AS open_time,
+                                  CASE WHEN m.closed THEN m.end_date END AS close_time
+                           FROM poly_markets m JOIN poly_tracking t USING (condition_id)
+                           WHERE m.condition_id = %s""", (ticker,))
+    else:
+        rows = db.query("SELECT open_time, close_time FROM kalshi_markets WHERE ticker = %s",
+                        (ticker,))
     if not rows:
         raise ApiError(404, "not_found", f"no market {ticker!r} in the store (it holds markets"
                        f" open now or closed in the last {settings.MARKET_RETENTION_DAYS} days)")
@@ -173,7 +189,30 @@ class Worker:
                    + (" AND status = 'running'" if only_running else ""),
                    (status, error, candles, job["job_id"]))
 
+    def _run_poly(self, jobs):
+        """Each market's trade list read again, back to the job's start."""
+        for job in jobs:
+            db.execute("UPDATE api_jobs SET requests_total = 1 WHERE job_id = %s", (job["job_id"],))
+            got = None
+            for _ in range(ATTEMPTS):
+                got = poly.fetch_market(job["ticker"], self.stop, job["from_ts"].timestamp() - 60)
+                if got is not None or self.stop.wait(10):
+                    break
+            if self.stop.is_set():
+                return
+            if got is None:
+                self._finish(job, "failed", f"Polymarket did not answer after {ATTEMPTS} tries")
+                continue
+            if not got[1]:
+                poly.fill_mid(job["ticker"], self.stop)
+            db.execute("UPDATE api_jobs SET requests_done = 1 WHERE job_id = %s", (job["job_id"],))
+            self._finish(job, "done", None, got[0])
+
     def _run(self, jobs):
+        self._run_poly([j for j in jobs if is_poly(j["ticker"])])
+        jobs = [j for j in jobs if not is_poly(j["ticker"])]
+        if not jobs:
+            return
         by_ticker = {j["ticker"]: j for j in jobs}      # one open job per market
         requests = fetch.plan([(t, int(j["from_ts"].timestamp()), int(j["to_ts"].timestamp()))
                                for t, j in by_ticker.items()])

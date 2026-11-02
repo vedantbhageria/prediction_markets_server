@@ -1,7 +1,7 @@
 flask
 psycopg2-binary
 pyarrow
-requests
+requests[socks]
 
 redis
 

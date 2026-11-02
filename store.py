@@ -217,6 +217,17 @@ def prune(days):
         ("poly candles", "DELETE FROM poly_candles WHERE condition_id IN"
                          " (SELECT condition_id FROM poly_markets"
                          "  WHERE closed IS TRUE AND end_date < %s)", True),
+        ("poly trades", "DELETE FROM poly_trades WHERE condition_id IN"
+                        " (SELECT condition_id FROM poly_markets"
+                        "  WHERE closed IS TRUE AND end_date < %s)", True),
+        # Trades and marked minutes of markets never listed (the feed has
+        # everything, discovery keeps only what is inside the window).
+        ("poly unlisted trades", "DELETE FROM poly_trades t WHERE t.ts < %s AND NOT EXISTS"
+                                 " (SELECT 1 FROM poly_markets m WHERE m.condition_id = t.condition_id)",
+         True),
+        ("poly unlisted minutes", "DELETE FROM poly_dirty d WHERE d.minute < now() - interval '2 days'"
+                                  " AND NOT EXISTS (SELECT 1 FROM poly_markets m"
+                                  "  WHERE m.condition_id = d.condition_id)", False),
         ("poly markets", "DELETE FROM poly_markets WHERE closed IS TRUE AND end_date < %s", True),
         ("poly events", "DELETE FROM poly_events e WHERE NOT EXISTS"
                         " (SELECT 1 FROM poly_markets p WHERE p.event_id = e.event_id)", False),

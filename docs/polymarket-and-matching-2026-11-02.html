@@ -1,0 +1,274 @@
+<title>Polymarket Build and Market Matching</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/* Layout: one reading column with wide tables in their own scrollers; summary first, evidence after. */
+:root {
+  --bg: #f7f8f9; --paper: #ffffff; --fg: #1d2329; --muted: #5d6873; --line: #dde2e7;
+  --accent: #1f6f78; --accent-soft: #e3f0f1; --good: #2f7d4f; --good-soft: #e5f2ea;
+  --warn: #9a6a00; --warn-soft: #fbf1d9; --bad: #b3312a; --bad-soft: #f8e3e1;
+  --code-bg: #f1f3f5;
+  --display: "Fraunces", Georgia, "Times New Roman", serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12171b; --paper: #182025; --fg: #e4e9ed; --muted: #9aa6b1; --line: #2b353d;
+  --accent: #6cc3cc; --accent-soft: #1c3236; --good: #7cc99a; --good-soft: #1b2e23;
+  --warn: #e3b54f; --warn-soft: #33290f; --bad: #f0857d; --bad-soft: #3a1f1d; --code-bg: #1f282e;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12171b; --paper: #182025; --fg: #e4e9ed; --muted: #9aa6b1; --line: #2b353d;
+  --accent: #6cc3cc; --accent-soft: #1c3236; --good: #7cc99a; --good-soft: #1b2e23;
+  --warn: #e3b54f; --warn-soft: #33290f; --bad: #f0857d; --bad-soft: #3a1f1d; --code-bg: #1f282e;
+  color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--body); }
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 40px 80px;
+        padding-left: max(16px, env(safe-area-inset-left, 0px));
+        padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+header .eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 600 clamp(28px, 4.4vw, 40px)/1.15 var(--display); margin: 10px 0 8px; text-wrap: balance; }
+h2 { font: 600 22px/1.25 var(--display); margin: 48px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); text-wrap: balance; }
+h3 { font: 600 16px/1.3 var(--body); margin: 26px 0 6px; }
+p, li { max-width: 68ch; }
+.lede { color: var(--muted); font-size: 16px; }
+code, .mono { font-family: var(--mono); font-size: 13px; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 22px 0 6px; }
+.tile { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.tile b { display: block; font: 600 24px/1.2 var(--body); font-variant-numeric: tabular-nums; }
+.tile span { color: var(--muted); font-size: 13px; }
+.tile.good b { color: var(--good); }
+.scroll { overflow-x: auto; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { font: 600 12px/1.3 var(--body); color: var(--muted); letter-spacing: .03em; text-transform: uppercase; background: var(--bg); }
+tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pill { display: inline-block; font: 500 11.5px/1.5 var(--mono); padding: 1px 8px; border-radius: 99px; white-space: nowrap; }
+.native { background: var(--good-soft); color: var(--good); }
+.regex { background: var(--accent-soft); color: var(--accent); }
+.model { background: var(--warn-soft); color: var(--warn); }
+.none { background: var(--bad-soft); color: var(--bad); }
+.pass { background: var(--good-soft); color: var(--good); }
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; counter-reset: step; }
+.flow div { background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 13.5px; }
+.flow div b { display: block; font-size: 14px; margin-bottom: 4px; }
+.flow div b::before { counter-increment: step; content: counter(step) ". "; color: var(--accent); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.two > div { min-width: 0; }
+pre { background: var(--code-bg); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font: 12.5px/1.55 var(--mono); margin: 8px 0; }
+.note { background: var(--paper); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 10px 14px; margin: 14px 0; font-size: 14px; }
+.muted { color: var(--muted); }
+@media (max-width: 700px) { .two { grid-template-columns: 1fr; } }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">prediction_markets_server · 2 Nov 2026</div>
+  <h1>Polymarket build and market matching</h1>
+  <p class="lede">Polymarket is now collected the way Kalshi is, through the same API, and passed a
+  full end-to-end test against a simulated venue. Nothing is deployed yet. The second half
+  designs title matching across both venues, with real measurements of what each venue gives
+  and what has to be read out of the wording.</p>
+</header>
+
+<div class="tiles">
+  <div class="tile good"><b>0 of 411,290</b><span>trades missing after outages, crashes and throttling</span></div>
+  <div class="tile good"><b>0 of 150,422</b><span>one-minute candles wrong</span></div>
+  <div class="tile"><b>~8 / min</b><span>Polymarket requests to follow every trade on the venue</span></div>
+  <div class="tile"><b>98.5%</b><span>of 84,570 real Polymarket questions fully read by regex (about 85% correctly so far)</span></div>
+</div>
+
+<h2>1. What was built</h2>
+<p>Polymarket has no candle endpoint, so candles are made here from its trades, which it publishes
+one by one with size, price and the taker's wallet. Kalshi is unchanged apart from sharing the
+code paths below.</p>
+<div class="scroll"><table>
+  <tr><th>Piece</th><th>Kalshi</th><th>Polymarket</th></tr>
+  <tr><td>Listing markets</td><td>discover.py, every 15 min (unchanged)</td><td>discover.py, in its own thread beside Kalshi; records each market's total and 24-hour volume</td></tr>
+  <tr><td>Live data</td><td>live.py: one-minute candles from Kalshi, hot markets every minute</td><td><b>trades.py</b> (new): reads the feed of every Polymarket trade every 15 s; after a gap, catches up market by market</td></tr>
+  <tr><td>Candles</td><td>Kalshi's own</td><td><b>aggregate.py</b> (new, separate process): one-minute OHLC, volume in shares, notional in USDC, trade count, from the stored trades</td></tr>
+  <tr><td>History</td><td>backfill.py, candles newest first</td><td>backfill.py <code>--venue poly</code>: each market's trade list, usually one request; the busiest markets' oldest history from the per-minute midpoint, marked <code>source = 'mid'</code></td></tr>
+  <tr><td>Request budget</td><td>240/min shared through Redis</td><td>its own, 300/min, same rules (priorities, 429 halves it)</td></tr>
+  <tr><td>Network</td><td>direct (Kalshi refuses Cloudflare WARP: HTTP 403)</td><td>through WARP (proxy mode, set up today), falling back to direct if WARP is down</td></tr>
+  <tr><td>API</td><td colspan="2">One API. A Polymarket market is its condition id (<code>0x…</code>) wherever a ticker goes; lists take <code>venue=kalshi|poly|all</code>; new <code>/v1/markets/{condition_id}/trades</code>; Polymarket in <code>/v1/status</code>; push backfills work for both. <code>pmapi.py</code> gains <code>pm.trades()</code>.</td></tr>
+  <tr><td>Viewer</td><td colspan="2">Status page gains a Polymarket section: reachability and route, feed lag, trades in the last 5 min, markets to catch up, candles waiting, history progress, requests.</td></tr>
+</table></div>
+<p class="muted">Two facts measured on the real Polymarket shaped this: its trade lists are served by copies
+running 2–6 minutes behind, each by a different amount, so coverage is claimed from the newest trade
+actually returned rather than the clock (Polymarket candles arrive about 5 minutes late; Kalshi's 1–2);
+and its listed total volume can be badly stale, so "did it trade?" uses total and 24-hour volume together.</p>
+
+<h2>2. Test results</h2>
+<p>Run on the server in its own schema and Redis, against a simulated Polymarket of 1,783 markets
+trading about 930 times a minute (the real venue's rate), with its lists cut to 2,000 trades so a gap
+is two minutes away. Every trade the simulated venue made is known, so every stored trade and candle was checked.</p>
+<div class="scroll"><table>
+  <tr><th>Phase</th><th>What happened</th><th class="num">Trades checked</th><th class="num">Missing / wrong</th><th>Result</th></tr>
+  <tr><td>Discover</td><td>1,763 markets listed and tracked; 500 never-traded ones need no history</td><td class="num">—</td><td class="num">—</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Live + backfill</td><td>History of 1,229 markets in 3 min (1,756 requests, 60 cut off and filled with midpoints), then 4 min of live feed with new markets opening</td><td class="num">395,576</td><td class="num">0 / 0</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Network outage</td><td>Venue dropped every connection for 4 min, twice the feed's reach: gap noticed, caught up market by market</td><td class="num">396,750</td><td class="num">0 / 0</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Crash</td><td>trades.py and aggregate.py killed with -9 for 3 min, restarted</td><td class="num">407,443</td><td class="num">0 / 0</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Throttling</td><td>80% of requests refused (429) for a minute; budget halved to 0.5 by itself</td><td class="num">411,290</td><td class="num">0 / 0</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>API</td><td>Markets (poly, all, tag filter), detail, candles raw/forward/1h/mixed, 1,972 trades paged exactly, latest, push backfill, status; pmapi; viewer status page</td><td class="num">—</td><td class="num">—</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Load</td><td>~64 requests/min at rest (test settings, 4× production's polling); feed 32 s behind; 20 API clients: 156 req/s, typical 118 ms, slowest 5% 225 ms, 0 errors</td><td class="num">—</td><td class="num">—</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Prune</td><td>20 markets closed past retention: 5,208 trades and 2,622 candles gone, nothing left behind</td><td class="num">—</td><td class="num">—</td><td><span class="pill pass">pass</span></td></tr>
+  <tr><td>Kalshi unchanged</td><td>Kalshi's own suites against the new code: activity (3 s), rate limiter (166 s), API (95 s)</td><td class="num">—</td><td class="num">—</td><td><span class="pill pass">pass</span></td></tr>
+</table></div>
+
+<h3>Bugs the testing found, all fixed</h3>
+<div class="scroll"><table>
+  <tr><th>Bug</th><th>Effect</th><th>Fix</th></tr>
+  <tr><td>"History complete?" came out NULL for markets with no midpoint history</td><td>Backfill thought there was nothing to do</td><td>NULL treated as "not complete"</td></tr>
+  <tr><td>Pages of a trade list answered by copies of different staleness</td><td>65 trades in 395,008 skipped between pages</td><td>Pages overlap; a page that does not overlap is asked again from further forward</td></tr>
+  <tr><td>Aggregator read trades as of the start of its statement</td><td>120 candles in 147,153 missed a trade committed mid-statement</td><td>Claim the minutes first, then read their trades in a second statement</td></tr>
+  <tr><td>A writer did not lock a minute's existing mark</td><td>A minute could be made before its new trade was visible</td><td>Writers touch the mark, so it is locked until they commit</td></tr>
+  <tr><td>The feed called a gap when it reached its last stopping point but not the full overlap behind it</td><td>Needless restarts and catch-ups; nothing lost</td><td>Continuity judged against the stopping point; feed re-reads less (about 2 requests a poll instead of 3)</td></tr>
+</table></div>
+<p id="rerun" class="note">The last fix came after the full run, so the feed phases (discover, live, outage, crash, throttling)
+were run again with it: <b>all passed</b> — 414,317 trades and 150,916 candles checked, 0 missing, 0 wrong.
+The feed declared exactly two gaps, both real (the outage and the crash), and no false ones.</p>
+
+<h2>3. What Polymarket gives that Kalshi does not</h2>
+<div class="scroll"><table>
+  <tr><th>Data</th><th>Polymarket</th><th>Kalshi</th><th>Stored here</th></tr>
+  <tr><td>Every trade, with who made it</td><td>Yes: size, price, taker's proxy wallet, pseudonym, Polygon transaction</td><td>Trades are public but anonymous; not collected here</td><td>Yes (<code>poly_trades</code>, wallet and transaction)</td></tr>
+  <tr><td>Who holds each market, per-wallet positions and profit</td><td>Yes (data API, on-chain)</td><td>No</td><td>Not yet</td></tr>
+  <tr><td>Topic tags</td><td>8–9 per event (e.g. Crypto, IPOs, Finance)</td><td>One category per event, tags per series</td><td>Event tags, filterable in the API (<code>tag=</code>)</td></tr>
+  <tr><td>24-hour, week, month, year volume; liquidity; best bid and ask; price changes</td><td>Yes, in the listing</td><td>24-hour volume, bid and ask, liquidity</td><td>Total and 24-hour volume, liquidity</td></tr>
+  <tr><td>Rules and resolution</td><td>Description, resolution source, UMA oracle status</td><td>Primary and secondary rules, settlement sources</td><td>In the raw payload, both</td></tr>
+  <tr><td>One-minute OHLC candles</td><td>No; only a sampled midpoint</td><td>Yes, with volume</td><td>Kalshi's own; Polymarket's made from trades</td></tr>
+  <tr><td>Open interest per minute</td><td>No; a current figure only</td><td>Yes, in every candle</td><td>Kalshi only</td></tr>
+  <tr><td>Structured strikes</td><td>No; only in the wording</td><td>Yes: strike type, floor and cap</td><td>Kalshi native; Polymarket to be read out (section 4)</td></tr>
+</table></div>
+
+<h2>4. Title matching: the design</h2>
+<p>Turn every market on both venues into the same record — what is asked, about whom, compared how,
+against what number, by when — then match records. A text embedding finds candidates; the structured
+fields decide the relation. Comparators and numbers stay out of the vector because embeddings cannot
+tell "above $70k" from "below $70k" (they score about 0.98 alike).</p>
+
+<div class="flow">
+  <div><b>Normalise</b>Each market into one record: native fields first, regex second, a small language model for what is left.</div>
+  <div><b>Mask</b>Numbers, dates and comparators replaced by slots: "Bitcoin price at ⟨time⟩ ⟨cmp⟩ ⟨x⟩".</div>
+  <div><b>Embed</b>The masked event text, once per distinct template, with an off-the-shelf model; vectors in pgvector.</div>
+  <div><b>Candidates</b>Nearest vectors across both venues, inside a compatible date window and topic.</div>
+  <div><b>Classify</b>Rules on the fields label each pair; the model only checks pairs the rules cannot settle.</div>
+</div>
+
+<h3>The common record</h3>
+<div class="scroll"><table>
+  <tr><th>Field</th><th>Meaning</th><th>Kalshi (illustrative)</th><th>Polymarket (illustrative)</th></tr>
+  <tr><td><code>venue, market_id</code></td><td>Which market</td><td><code>kalshi</code>, a ticker</td><td><code>poly</code>, 0x…</td></tr>
+  <tr><td><code>kind</code></td><td>threshold, outcome, matchup, total, spread, up_down, yes_no_event</td><td>threshold</td><td>threshold</td></tr>
+  <tr><td><code>subject</code></td><td>What it is about</td><td>BNB</td><td>BNB</td></tr>
+  <tr><td><code>metric</code></td><td>What is measured</td><td>price</td><td>price</td></tr>
+  <tr><td><code>entity</code></td><td>The named outcome, for who/which questions</td><td>—</td><td>—</td></tr>
+  <tr><td><code>comparator</code></td><td>greater, greater_or_equal, less, less_or_equal, between, exactly, wins, is</td><td>greater</td><td>greater ("reach")</td></tr>
+  <tr><td><code>low, high, unit</code></td><td>Thresholds, normalised (70k → 70000)</td><td>1400, —, USD</td><td>1400, —, USD</td></tr>
+  <tr><td><code>when, when_kind</code></td><td>The date, and whether it is <i>by</i> (any time until), <i>on</i> (that moment) or <i>within</i> (a period)</td><td>2026-12-31, by</td><td>2026-12-31, by</td></tr>
+  <tr><td><code>group_id, mutually_exclusive</code></td><td>The set of linked markets</td><td>event, true</td><td>event, negRisk</td></tr>
+  <tr><td><code>topic</code></td><td>Category and tags</td><td>Crypto</td><td>Crypto, BNB</td></tr>
+  <tr><td><code>resolution_source</code></td><td>What settles it</td><td>CF Benchmarks</td><td>Binance</td></tr>
+  <tr><td><code>placeholder</code></td><td>An outcome not named yet</td><td>—</td><td>"Will <b>E</b> win the MD-03 House seat?"</td></tr>
+  <tr><td><code>source_of_each_field</code></td><td>native, regex or model, per field, for auditing</td><td>mostly native</td><td>mostly regex</td></tr>
+</table></div>
+
+<h3>Where each field comes from</h3>
+<p><span class="pill native">native</span> the venue sends it as a field · <span class="pill regex">regex</span> read from the wording by rules · <span class="pill model">model</span> a small language model, only where rules fail · <span class="pill none">none</span> not available. Percentages are the share of real markets that have the field, from live samples of 4,000 Kalshi and 1,181 Polymarket markets.</p>
+<div class="scroll"><table>
+  <tr><th>Field</th><th>Kalshi</th><th>Polymarket</th></tr>
+  <tr><td>kind</td><td><span class="pill native">native</span> <code>strike_type</code> (93%) maps to it; untyped ones by <span class="pill regex">regex</span></td><td><span class="pill regex">regex</span> from the question's shape</td></tr>
+  <tr><td>comparator</td><td><span class="pill native">native</span> <code>strike_type</code>: greater, less, between, greater_or_equal, less_or_equal, custom, structured</td><td><span class="pill regex">regex</span>: "above", "at least", "reach", "dip to", "between", "or more", O/U…</td></tr>
+  <tr><td>low / high</td><td><span class="pill native">native</span> <code>floor_strike</code> / <code>cap_strike</code> on numeric markets (~25% of all)</td><td><span class="pill regex">regex</span> + number normaliser ($70k, 2.5%, 300-400k). <code>groupItemThreshold</code> looks like one but is only the display order</td></tr>
+  <tr><td>unit</td><td><span class="pill regex">regex</span> from title or <code>yes_sub_title</code> ("$", "%", "goals")</td><td><span class="pill regex">regex</span> from the question or <code>groupItemTitle</code></td></tr>
+  <tr><td>entity</td><td><span class="pill native">native</span> <code>custom_strike</code> (72%; often an id, e.g. a player's) and <code>yes_sub_title</code> (100%)</td><td><span class="pill native">native</span> <code>groupItemTitle</code> (99%) when the event is a set of outcomes; else <span class="pill regex">regex</span></td></tr>
+  <tr><td>subject / metric</td><td><span class="pill regex">regex</span> per series family (a few hundred templates), helped by series title</td><td><span class="pill regex">regex</span>, then <span class="pill model">model</span> for irregular wording</td></tr>
+  <tr><td>when</td><td><span class="pill native">native</span> <code>occurrence_datetime</code> (91%), close and expiration times</td><td><span class="pill regex">regex</span> + date parser ("by March 31, 2026", "in 2026"); <code>endDate</code> (73%) only as a cross-check, it is often a day off</td></tr>
+  <tr><td>when_kind (by / on / within)</td><td><span class="pill regex">regex</span> on the title, checked against <code>strike_type</code> and rules</td><td><span class="pill regex">regex</span> on the preposition ("by", "on", "in")</td></tr>
+  <tr><td>group, exclusivity</td><td><span class="pill native">native</span> event, <code>mutually_exclusive</code></td><td><span class="pill native">native</span> event, <code>negRisk</code></td></tr>
+  <tr><td>topic</td><td><span class="pill native">native</span> event <code>category</code>, series <code>tags</code></td><td><span class="pill native">native</span> event <code>tags</code> (100%)</td></tr>
+  <tr><td>resolution source</td><td><span class="pill native">native</span> event <code>settlement_sources</code>; details in rules</td><td><span class="pill native">native</span> <code>resolutionSource</code> when filled; else <span class="pill regex">regex</span> on the description</td></tr>
+  <tr><td>placeholder</td><td><span class="pill none">none</span> (Kalshi names outcomes)</td><td><span class="pill regex">regex</span>: single letters, "Person AB", "Contestant 36", "Candidate X"</td></tr>
+</table></div>
+
+<h3>Two records, same shape</h3>
+<div class="two">
+<div><pre>// Kalshi (illustrative) — almost all native
+{ venue: "kalshi",
+  title: "BNB price on Dec 31, 2026?",
+  yes_sub_title: "$1,400 or above",
+  kind: "threshold",          // strike_type
+  comparator: "greater",      // strike_type
+  low: 1400, unit: "USD",     // floor_strike; unit by regex
+  subject: "BNB", metric: "price",   // regex (series)
+  when: "2026-12-31", when_kind: "on",
+  resolution_source: "CF Benchmarks" }</pre></div>
+<div><pre>// Polymarket (a real question) — read from the wording
+{ venue: "poly",
+  question: "Will BNB reach $1400 by December 31, 2026?",
+  groupItemTitle: "↑ 1400",
+  kind: "threshold",          // regex
+  comparator: "greater",      // "reach"
+  low: 1400, unit: "USD",     // regex + normaliser
+  subject: "BNB", metric: "price",   // regex
+  when: "2026-12-31", when_kind: "by",
+  resolution_source: "Binance" }</pre></div>
+</div>
+<p class="muted">These two are <i>not</i> the same bet: one asks whether BNB is above $1,400 <i>on</i> 31 December, the other whether it
+reaches $1,400 at any point <i>by</i> then, on a different price source. The matcher labels them
+<b>related</b>, not identical — the kind of difference a title-only match would miss.</p>
+
+<h3>How a pair is labelled</h3>
+<div class="scroll"><table>
+  <tr><th>Label</th><th>Rule on the fields</th><th>Example</th></tr>
+  <tr><td>identical</td><td>Same subject, metric, comparator, threshold, date and kind of date</td><td>BTC above 70k on 3 Nov ↔ BTC above 70k on 3 Nov</td></tr>
+  <tr><td>identical, different source</td><td>As above, but settled on a different source</td><td>BRTI ↔ Binance</td></tr>
+  <tr><td>complement</td><td>Same threshold, opposite comparator: one side of the other</td><td>above 70k ↔ below 70k</td></tr>
+  <tr><td>nested</td><td>Same comparator, thresholds ordered: one implies the other</td><td>above 70k ↔ above 75k</td></tr>
+  <tr><td>overlapping</td><td>Ranges share some values</td><td>between 70–72k ↔ above 71k</td></tr>
+  <tr><td>same outcome</td><td>Same group question, same named entity</td><td>"Iohannis" in NATO Secretary General ↔ the same on the other venue</td></tr>
+  <tr><td>related</td><td>Same event, different question</td><td>BNB on 31 Dec ↔ BNB by 31 Dec</td></tr>
+</table></div>
+
+<h2>5. Where a language model and embeddings are used, and why</h2>
+<div class="scroll"><table>
+  <tr><th>Tool</th><th>Used for</th><th>Why</th><th>Why not more</th></tr>
+  <tr><td>Native fields</td><td>Everything a venue already sends</td><td>Exact and free. Kalshi covers comparator, numbers, entity and date for most markets</td><td>—</td></tr>
+  <tr><td>Regex</td><td>Polymarket's wording; Kalshi's units and subjects</td><td>Titles are formulaic: on 84,570 real Polymarket questions, regex filled every field for 98.5%. Fast, auditable, deterministic</td><td>Some readings are wrong (below); each shape is checked by hand before it is trusted</td></tr>
+  <tr><td>Small language model</td><td>Only questions regex cannot read, and only to fill the same fields; checking pairs the rules leave unsettled</td><td>Handles irregular wording ("Saturn FDV above $400M one day after launch")</td><td>Slower, and can be confidently wrong; kept to a few percent and every output marked <code>model</code></td></tr>
+  <tr><td>Embeddings</td><td>Finding "same event" candidates across wording ("BTC" ↔ "Bitcoin", "Fed cuts" ↔ "FOMC lowers")</td><td>Cosine similarity on meaning, where trigram matching sees only shared letters</td><td>Blind to numbers, negation and comparators, so they never decide a match on their own</td></tr>
+  <tr><td>Training our own model</td><td>Not at first</td><td>Off-the-shelf models (bge-small, MiniLM; 384 dimensions) run on the server's CPU</td><td>Worth fine-tuning only once a few thousand confirmed matches exist to learn from</td></tr>
+</table></div>
+
+<h3>Measured so far</h3>
+<div class="scroll"><table>
+  <tr><th>Polymarket question shape</th><th class="num">Share of 84,570</th><th class="num">Regex filled every field</th></tr>
+  <tr><td>Outcome ("Will X win…", "Will X be the next…")</td><td class="num">39.7%</td><td class="num">100%</td></tr>
+  <tr><td>Total ("O/U 7.5 corners")</td><td class="num">29.3%</td><td class="num">100%</td></tr>
+  <tr><td>Threshold ("above $70k", "less than 0%")</td><td class="num">24.3%</td><td class="num">95.5%</td></tr>
+  <tr><td>Matchup ("A vs B")</td><td class="num">5.7%</td><td class="num">100%</td></tr>
+  <tr><td>Spread, up/down, yes/no event, unread</td><td class="num">1.1%</td><td class="num">mixed</td></tr>
+</table></div>
+<p>Filled is not the same as right. A hand check of 70 random distinct shapes found about one in eight
+read wrongly, all fixable rules: "$200 <b>b</b>y Dec 31" read as $200 billion; "2026-27 season" read as
+a range; "300-400k" read as 300 to 400,000; a date ladder's date taken as the entity; placeholder
+outcomes ("Will E win…", "Person AN") read as names; and threshold questions missing their subject.
+The first job of the build is fixing these and measuring accuracy on 200 hand-labelled markets per venue.</p>
+
+<h3>What it needs</h3>
+<ul>
+  <li><b>pgvector</b> installed in PostgreSQL: one sudo command from you.</li>
+  <li>About 770,000 distinct titles (570,000 Kalshi, 200,000 Polymarket); far fewer once numbers are masked. First embedding pass well under an hour on the CPU, then only new titles.</li>
+  <li>Roughly 0.5–1 GB for vectors and the HNSW index.</li>
+  <li>New tables <code>propositions</code> and <code>matches</code>; an API endpoint <code>/v1/markets/{ticker}/matches</code>; a viewer panel.</li>
+</ul>
+
+<h2>6. Decisions for you</h2>
+<ol>
+  <li><b>Deploy Polymarket?</b> Restarts discover, backfill, the API and viewer once the network is quiet, adds trades.py and aggregate.py, and sets <code>VPN_PROXY</code> in .env. The service install (8 programs now) is still your one sudo command.</li>
+  <li><b>Build matching?</b> In the order above: fix and measure the extractor, then embeddings (needs pgvector), then the matcher and its labels, checked by hand on 200 pairs before use.</li>
+</ol>
+</div>

@@ -19,6 +19,12 @@ starts part-way through a market's life carries the last close before it in.
 `fill=raw` gives only the buckets that had a trade.
 
 The last bucket may still be in progress, as with any exchange's candles.
+
+Polymarket markets -- named by condition id, 0x... -- are read the same way
+from poly_candles, which aggregate.py makes from every trade. Their coverage
+is poly_tracking's [trades_from, poly_covered_to(trades_to)), starting at
+history_from where midpoints fill the oldest part. They have no open
+interest; a midpoint candle has no volume.
 """
 
 import time
@@ -44,18 +50,56 @@ def _epoch(dt):
     return dt.timestamp() if dt is not None else None
 
 
+# Per venue: the candle table, its key, and what stands in for open interest.
+TABLES = {"kalshi": ("kalshi_candles", "ticker", "open_interest"),
+          "poly": ("poly_candles", "condition_id", "NULL::numeric")}
+
+
+def venue_of(ticker):
+    return "poly" if ticker.startswith("0x") else "kalshi"
+
+
+# When a Polymarket market started, from the venue's own payload.
+POLY_START = """CASE WHEN m.raw->>'startDate' ~ '^\\d{4}-'
+                     THEN (m.raw->>'startDate')::timestamptz END"""
+# ...and when it stopped trading: its closed time, else its end date.
+POLY_CLOSE = """CASE WHEN m.closed THEN COALESCE(CASE WHEN m.raw->>'closedTime' ~ '^\\d{4}-'
+                     THEN (m.raw->>'closedTime')::timestamptz END, m.end_date) END"""
+
+
 def market_info(cur, tickers):
     """{ticker: what reading its candles needs}, for the tickers that exist."""
-    cur.execute("""
-        SELECT m.ticker, m.open_time, m.close_time,
-               t.candles_fetched_from, t.candles_fetched_to
-        FROM kalshi_markets m LEFT JOIN kalshi_tracking t USING (ticker)
-        WHERE m.ticker = ANY(%s)""", (list(tickers),))
-    return {r["ticker"]: {"ticker": r["ticker"], "open": _epoch(r["open_time"]),
-                          "close": _epoch(r["close_time"]),
-                          "from": _epoch(r["candles_fetched_from"]),
-                          "to": _epoch(r["candles_fetched_to"])}
-            for r in cur.fetchall()}
+    tickers = list(tickers)
+    kalshi = [t for t in tickers if venue_of(t) == "kalshi"]
+    polys = [t for t in tickers if venue_of(t) == "poly"]
+    out = {}
+    if kalshi:
+        cur.execute("""
+            SELECT m.ticker, m.open_time, m.close_time,
+                   t.candles_fetched_from, t.candles_fetched_to
+            FROM kalshi_markets m LEFT JOIN kalshi_tracking t USING (ticker)
+            WHERE m.ticker = ANY(%s)""", (kalshi,))
+        out.update({r["ticker"]: {"ticker": r["ticker"], "venue": "kalshi",
+                                  "open": _epoch(r["open_time"]),
+                                  "close": _epoch(r["close_time"]),
+                                  "from": _epoch(r["candles_fetched_from"]),
+                                  "to": _epoch(r["candles_fetched_to"])}
+                    for r in cur.fetchall()})
+    if polys:
+        cur.execute(f"""
+            SELECT m.condition_id AS ticker, {POLY_START} AS open_time, {POLY_CLOSE} AS close_time,
+                   CASE WHEN t.mid_to >= t.trades_from THEN t.history_from
+                        ELSE t.trades_from END AS fetched_from,
+                   poly_covered_to(t.trades_to) AS fetched_to
+            FROM poly_markets m LEFT JOIN poly_tracking t USING (condition_id)
+            WHERE m.condition_id = ANY(%s)""", (polys,))
+        out.update({r["ticker"]: {"ticker": r["ticker"], "venue": "poly",
+                                  "open": _epoch(r["open_time"]),
+                                  "close": _epoch(r["close_time"]),
+                                  "from": _epoch(r["fetched_from"]),
+                                  "to": _epoch(r["fetched_to"])}
+                    for r in cur.fetchall()})
+    return out
 
 
 def window(info, start, end, now):
@@ -83,19 +127,20 @@ def coverage(info, a, b, now):
 def _stored(cur, ticker, step, a, b, limit=None):
     """Stored candles with bucket start in [a, b), one row per bucket that
     had a trade, oldest first: [(t, open, high, low, close, volume, oi)]."""
+    table, key, oi = TABLES[venue_of(ticker)]
     if step == 60:
-        sql = """SELECT EXTRACT(EPOCH FROM ts)::bigint AS t, open AS o, high AS h, low AS l,
-                        close AS c, volume AS v, open_interest AS oi
-                 FROM kalshi_candles
-                 WHERE ticker = %(t)s AND ts >= to_timestamp(%(a)s) AND ts < to_timestamp(%(b)s)
-                 ORDER BY ts"""
+        sql = f"""SELECT EXTRACT(EPOCH FROM ts)::bigint AS t, open AS o, high AS h, low AS l,
+                         close AS c, volume AS v, {oi} AS oi
+                  FROM {table}
+                  WHERE {key} = %(t)s AND ts >= to_timestamp(%(a)s) AND ts < to_timestamp(%(b)s)
+                  ORDER BY ts"""
     else:
-        sql = """SELECT (floor(EXTRACT(EPOCH FROM ts) / %(s)s) * %(s)s)::bigint AS t,
-                        first(open, ts) AS o, max(high) AS h, min(low) AS l, last(close, ts) AS c,
-                        sum(volume) AS v, last(open_interest, ts) AS oi
-                 FROM kalshi_candles
-                 WHERE ticker = %(t)s AND ts >= to_timestamp(%(a)s) AND ts < to_timestamp(%(b)s)
-                 GROUP BY 1 ORDER BY 1"""
+        sql = f"""SELECT (floor(EXTRACT(EPOCH FROM ts) / %(s)s) * %(s)s)::bigint AS t,
+                         first(open, ts) AS o, max(high) AS h, min(low) AS l, last(close, ts) AS c,
+                         sum(volume) AS v, last({oi}, ts) AS oi
+                  FROM {table}
+                  WHERE {key} = %(t)s AND ts >= to_timestamp(%(a)s) AND ts < to_timestamp(%(b)s)
+                  GROUP BY 1 ORDER BY 1"""
     if limit is not None:
         sql += " LIMIT %(n)s"
     cur.execute(sql, {"t": ticker, "s": step, "a": a, "b": b, "n": limit})
@@ -106,9 +151,10 @@ def _stored(cur, ticker, step, a, b, limit=None):
 
 def _before(cur, ticker, lo, a):
     """(close, open_interest) of the last stored candle in [lo, a), or None."""
-    cur.execute("""SELECT close, open_interest FROM kalshi_candles
-                   WHERE ticker = %s AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)
-                   ORDER BY ts DESC LIMIT 1""", (ticker, lo, a))
+    table, key, oi = TABLES[venue_of(ticker)]
+    cur.execute(f"""SELECT close, {oi} AS open_interest FROM {table}
+                    WHERE {key} = %s AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)
+                    ORDER BY ts DESC LIMIT 1""", (ticker, lo, a))
     row = cur.fetchone()
     return (float(row["close"]), None if row["open_interest"] is None
             else float(row["open_interest"])) if row else None

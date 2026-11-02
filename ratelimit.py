@@ -1,4 +1,4 @@
-"""One Kalshi request budget, shared by every program through Redis.
+"""One request budget per venue, shared by every program through Redis.
 
 discover.py, live.py and backfill.py each take a token before every Kalshi
 request, from a single bucket kept in Redis. However many of them run, the
@@ -18,6 +18,9 @@ total stays inside KALSHI_REQUESTS_PER_MIN:
 
 If Redis is unreachable each process falls back to its own bucket with a third
 of the budget, so the guarantee holds while it is away.
+
+Polymarket has a bucket of its own, the same in every way, sized by
+POLY_REQUESTS_PER_MIN and POLY_MAX_PER_SECOND; each call names its venue.
 """
 
 import logging
@@ -88,14 +91,33 @@ redis.call('INCR', KEYS[4] .. 'throttled:' .. math.floor(now / 60))
 return tostring(f)
 """
 
-_KEYS = [KEY + "bucket", KEY + "factor", KEY + "factor_at", KEY + "used:"]
+def prefix(venue):
+    return f"{settings.REDIS_PREFIX}{venue}:"
+
+
+def _keys(venue):
+    k = prefix(venue)
+    return [k + "bucket", k + "factor", k + "factor_at", k + "used:"]
+
+
+def limits(venue):
+    """(requests a minute, most in any second) for this venue."""
+    if venue == "poly":
+        return settings.POLY_REQUESTS_PER_MIN, settings.POLY_MAX_PER_SECOND
+    return settings.KALSHI_REQUESTS_PER_MIN, settings.KALSHI_MAX_PER_SECOND
+
 
 _local = threading.local()
 _lock = threading.Lock()
 _client = None
 _scripts = {}
 _down_until = 0.0
-_fallback = {"tokens": 0.0, "ts": time.monotonic(), "factor": 1.0, "factor_at": 0.0}
+_fallbacks = {}
+
+
+def _fallback(venue):
+    return _fallbacks.setdefault(venue, {"tokens": 0.0, "ts": time.monotonic(),
+                                         "factor": 1.0, "factor_at": 0.0})
 
 DEFAULT = "discover"        # each program sets its own
 
@@ -109,11 +131,11 @@ def shape(budget, per_second):
     return size, max(0.01, min(rate, per_second - size))
 
 
-def effective_budget():
+def effective_budget(venue="kalshi"):
     """Requests a minute the bucket really allows now: the budget after any
     429 cut, and within the per-second cap."""
-    size, rate = shape(settings.KALSHI_REQUESTS_PER_MIN * factor(),
-                       settings.KALSHI_MAX_PER_SECOND)
+    budget, per_second = limits(venue)
+    size, rate = shape(budget * factor(venue), per_second)
     return size + rate * 60
 
 
@@ -153,20 +175,19 @@ def _redis_ok():
 def _redis_failed(exc):
     global _down_until
     if _redis_ok():
-        log.warning("redis unreachable (%s); using a local budget of %d/min for 30s",
-                    exc, settings.KALSHI_REQUESTS_PER_MIN * FALLBACK_SHARE)
+        log.warning("redis unreachable (%s); using a local third of each budget for 30s", exc)
     _down_until = time.monotonic() + 30
 
 
-def _take_local(share):
+def _take_local(share, venue):
     """The same bucket, in-process, with a third of the budget."""
     with _lock:
         now = time.monotonic()
-        f = _fallback
+        f = _fallback(venue)
         if f["factor"] < 1 and now - f["factor_at"] >= 600:
             f["factor"], f["factor_at"] = min(1.0, f["factor"] * 1.1), now
-        b = settings.KALSHI_REQUESTS_PER_MIN * FALLBACK_SHARE * f["factor"]
-        size, rate = shape(b, settings.KALSHI_MAX_PER_SECOND * FALLBACK_SHARE)
+        budget, per_second = limits(venue)
+        size, rate = shape(budget * FALLBACK_SHARE * f["factor"], per_second * FALLBACK_SHARE)
         f["tokens"] = min(size, f["tokens"] + (now - f["ts"]) * rate)
         f["ts"] = now
         need = 1 + (1 - share) * (size - 1)
@@ -176,24 +197,24 @@ def _take_local(share):
         return 0.0
 
 
-def acquire(stop=None):
-    """Block until this thread may send one Kalshi request.
+def acquire(stop=None, venue="kalshi"):
+    """Block until this thread may send one request to `venue`.
 
     Returns False only if `stop` was set while waiting.
     """
     priority = current()
     share = SHARE[priority]
+    budget, per_second = limits(venue)
     while True:
         wait = None
         if _redis_ok():
             try:
                 wait = float(_script("take", _TAKE)(
-                    keys=_KEYS, args=[settings.KALSHI_REQUESTS_PER_MIN, share, priority,
-                                      settings.KALSHI_MAX_PER_SECOND]))
+                    keys=_keys(venue), args=[budget, share, priority, per_second]))
             except redis.RedisError as exc:
                 _redis_failed(exc)
         if wait is None:
-            wait = _take_local(share)
+            wait = _take_local(share, venue)
         if wait <= 0:
             return True
         # Short naps: a higher priority may take the token first, and that is
@@ -206,41 +227,42 @@ def acquire(stop=None):
             time.sleep(nap)
 
 
-def throttled():
-    """Kalshi answered 429: halve the budget for every program."""
-    log.warning("kalshi said too many requests; halving the request budget")
+def throttled(venue="kalshi"):
+    """The venue answered 429: halve its budget for every program."""
+    log.warning("%s said too many requests; halving its request budget", venue)
     if _redis_ok():
         try:
-            _script("throttled", _THROTTLED)(keys=_KEYS, args=[MIN_FACTOR])
+            _script("throttled", _THROTTLED)(keys=_keys(venue), args=[MIN_FACTOR])
         except redis.RedisError as exc:
             _redis_failed(exc)
     with _lock:
         now = time.monotonic()
-        if now - _fallback["factor_at"] > 5:
-            _fallback["factor"] = max(MIN_FACTOR, _fallback["factor"] / 2)
-        _fallback["factor_at"], _fallback["tokens"] = now, 0.0
+        f = _fallback(venue)
+        if now - f["factor_at"] > 5:
+            f["factor"] = max(MIN_FACTOR, f["factor"] / 2)
+        f["factor_at"], f["tokens"] = now, 0.0
 
 
-def factor():
+def factor(venue="kalshi"):
     """The share of the budget in force right now (1.0 = no throttling)."""
     try:
-        return float(client().get(KEY + "factor") or 1)
+        return float(client().get(prefix(venue) + "factor") or 1)
     except redis.RedisError:
-        return _fallback["factor"]
+        return _fallback(venue)["factor"]
 
 
-def used(source, minutes):
+def used(source, minutes, venue="kalshi"):
     """Requests `source` made in the last `minutes` whole minutes, or None."""
     try:
         now = int(client().time()[0]) // 60
-        keys = [f"{KEY}used:{source}:{m}" for m in range(now - minutes, now)]
+        keys = [f"{prefix(venue)}used:{source}:{m}" for m in range(now - minutes, now)]
         return sum(int(v or 0) for v in client().mget(keys))
     except redis.RedisError:
         return None
 
 
-def per_minute(source, since_minute, until_minute):
+def per_minute(source, since_minute, until_minute, venue="kalshi"):
     """{minute: requests} for `source`, by Redis minute number. For tests."""
-    keys = [f"{KEY}used:{source}:{m}" for m in range(since_minute, until_minute + 1)]
+    keys = [f"{prefix(venue)}used:{source}:{m}" for m in range(since_minute, until_minute + 1)]
     return {m: int(v or 0) for m, v in zip(range(since_minute, until_minute + 1),
                                            client().mget(keys))}

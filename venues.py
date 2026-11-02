@@ -1,7 +1,7 @@
 """Read-only calls to Kalshi and Polymarket.
 
-Everything here is a public endpoint; no API key is involved. Every Kalshi
-request first takes a token from the shared budget in ratelimit.py.
+Everything here is a public endpoint; no API key is involved. Every request
+first takes a token from its venue's shared budget in ratelimit.py.
 """
 
 import json
@@ -20,12 +20,21 @@ import settings
 log = logging.getLogger("venues")
 
 KALSHI = settings.KALSHI_API_URL
-GAMMA = "https://gamma-api.polymarket.com"
-CLOB = "https://clob.polymarket.com"
+GAMMA = settings.POLY_GAMMA_URL
+CLOB = settings.POLY_CLOB_URL
+DATA = settings.POLY_DATA_URL
+POLY_HOSTS = (GAMMA, CLOB, DATA)
 
 KALSHI_BATCH = 100      # tickers per /markets or /markets/candlesticks request
 KALSHI_MAX_CANDLES = 10_000     # market-minutes one candlesticks request may ask for
 POLY_BATCH = 400        # tokens per /midpoints request; the API rejects ~1000
+# The trade lists refuse an offset past POLY_MAX_OFFSET and a page over
+# POLY_MAX_PAGE, so the newest 20,000 trades are all that can be reached, on
+# the whole feed or for one market. They are read in these (offset, limit)
+# steps: small pages first, as most reads need only those, then large ones.
+POLY_MAX_OFFSET = 10_000
+POLY_MAX_PAGE = 10_000
+POLY_PAGES = settings.POLY_PAGES
 GAMMA_BATCH = 50        # condition ids per /markets request
 
 
@@ -40,10 +49,71 @@ _local = threading.local()
 _pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="venue")
 
 
-def session():
-    if not hasattr(_local, "session"):
-        _local.session = requests.Session()
-    return _local.session
+def session(via="direct"):
+    """This thread's Session for one way out: "direct", or "vpn" through
+    settings.VPN_PROXY."""
+    sessions = _local.__dict__.setdefault("sessions", {})
+    if via not in sessions:
+        s = requests.Session()
+        if via == "vpn":
+            s.proxies = {"http": settings.VPN_PROXY, "https": settings.VPN_PROXY}
+            s.trust_env = False
+        sessions[via] = s
+    return sessions[via]
+
+
+class Route:
+    """Which way requests to one host go out: through the VPN proxy if it is
+    configured for the host, otherwise direct.
+
+    A request that cannot connect one way is tried the other way before the
+    host counts as unreachable. After falling back to direct, the proxy is
+    tried again every VPN_RETRY_SECONDS, so a tunnel that comes back is used
+    again without a restart.
+    """
+
+    def __init__(self, host):
+        self.host = host
+        self.vpn = bool(settings.VPN_PROXY) and host in settings.VPN_HOSTS
+        self.via = "vpn" if self.vpn else "direct"
+        self.since = time.time()
+        self.lock = threading.Lock()
+
+    def ways(self):
+        return ["vpn", "direct"] if self.vpn else ["direct"]
+
+    def current(self):
+        with self.lock:
+            if (self.vpn and self.via == "direct"
+                    and time.time() - self.since > settings.VPN_RETRY_SECONDS):
+                self._set("vpn", "time to try it again")
+            return self.via
+
+    def failed(self, via, tried):
+        """`via` could not connect. The other way, if one is left untried, or None."""
+        with self.lock:
+            left = [w for w in self.ways() if w not in tried]
+            if not left:
+                return None
+            if self.via == via:
+                self._set(left[0], f"{via} could not connect")
+            return self.via if self.via in left else left[0]
+
+    def worked(self, via):
+        with self.lock:
+            if self.via != via:
+                self._set(via, "it answered")
+
+    def _set(self, via, why):
+        if via != self.via:
+            log.warning("%s: going %s (%s)", self.host, "through the VPN" if via == "vpn"
+                        else "direct", why)
+            self.via = via
+            self.since = time.time()
+            try:
+                ratelimit.client().set(f"{settings.REDIS_PREFIX}route:{self.host}", via)
+            except Exception:
+                pass
 
 
 class Link:
@@ -63,6 +133,7 @@ class Link:
         self.up.set()
         self.lock = threading.Lock()
         self.since = None
+        self.route = Route(host)
 
     def _publish(self):
         """Tell the API's /v1/status that this host is out, for as long as
@@ -84,16 +155,29 @@ class Link:
                     type(exc).__name__, settings.NET_PROBE_SECONDS)
         threading.Thread(target=self._probe, daemon=True, name=f"probe-{self.host}").start()
 
+    def _reachable(self, via):
+        """Can a connection be opened this way? No API request, so no budget
+        spent: direct opens a socket, the VPN fetches the host's front page
+        through the proxy and takes any answer at all."""
+        port = PORTS.get(self.host, 443)
+        try:
+            if via == "vpn":
+                session("vpn").head(f"https://{self.host}:{port}/", timeout=10)
+            else:
+                socket.getaddrinfo(self.host, port)
+                socket.create_connection((self.host, port), timeout=10).close()
+            return True
+        except (OSError, requests.RequestException):
+            return False
+
     def _probe(self):
         while True:
             time.sleep(settings.NET_PROBE_SECONDS)
-            try:
-                port = PORTS.get(self.host, 443)
-                socket.getaddrinfo(self.host, port)
-                socket.create_connection((self.host, port), timeout=10).close()
-            except OSError:
+            way = next((w for w in self.route.ways() if self._reachable(w)), None)
+            if way is None:
                 self._publish()
                 continue
+            self.route.worked(way)
             try:
                 ratelimit.client().delete(f"{settings.REDIS_PREFIX}down:{self.host}")
             except Exception:
@@ -141,25 +225,33 @@ def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None)
     from Kalshi halves that budget for every program before the retry.
     """
     status = None
-    kalshi = url.startswith(KALSHI)
+    venue = "kalshi" if url.startswith(KALSHI) else "poly" if url.startswith(POLY_HOSTS) else None
     net = link(url)
     attempt = unreachable = 0
+    via, tried = None, set()
     while True:
         if not net.wait(stop):
             raise VenueError(f"{url}: stopped", status)
-        if kalshi and not ratelimit.acquire(stop):
+        if venue and not ratelimit.acquire(stop, venue):
             raise VenueError(f"{url}: stopped", status)
+        via = via or net.route.current()
         try:
-            response = session().request(method, url, params=params, json=body,
-                                         timeout=timeout)
+            response = session(via).request(method, url, params=params, json=body,
+                                            timeout=timeout)
             status = response.status_code
             if status < 400:
                 return response.json()
-            if status == 429 and kalshi:
-                ratelimit.throttled()
+            if status == 429 and venue:
+                ratelimit.throttled(venue)
             elif status != 429 and status < 500:
                 raise VenueError(f"{url}: HTTP {status} {response.text[:120]}", status)
         except UNREACHABLE as exc:
+            # The other way out first, if there is one not tried yet.
+            tried.add(via)
+            via = net.route.failed(via, tried)
+            if via is not None:
+                continue
+            tried.clear()
             unreachable += 1
             if unreachable >= MAX_UNREACHABLE:
                 raise
@@ -317,3 +409,23 @@ def yes_token(market):
         return json.loads(market["clobTokenIds"])[0]
     except (KeyError, TypeError, ValueError, IndexError):
         return None
+
+
+def poly_trades(market=None, offset=0, limit=1000, stop=None):
+    """One page of trades, newest first: every trade on Polymarket, or one
+    market's (a condition id). Each is a taker's order as filled, so a trade is
+    counted once, with the taker's wallet."""
+    params = {"limit": limit, "offset": offset, "takerOnly": "true"}
+    if market:
+        params["market"] = market
+    return call("GET", DATA + "/trades", params=params, timeout=60, attempts=4, stop=stop) or []
+
+
+def poly_prices_history(token, start, end, stop=None):
+    """[(unix time, price)] for one token over [start, end], one point a
+    minute: the order book's midpoint, sampled -- not a trade price."""
+    data = call("GET", CLOB + "/prices-history",
+                params={"market": token, "startTs": int(start), "endTs": int(end), "fidelity": 1},
+                timeout=60, attempts=4, stop=stop) or {}
+    return [(int(p["t"]), float(p["p"])) for p in data.get("history") or []
+            if p.get("t") is not None and p.get("p") is not None]

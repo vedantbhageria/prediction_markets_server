@@ -15,6 +15,8 @@ SELECT create_hypertable('poly_candles', by_range('ts', INTERVAL '1 day'),
                          if_not_exists => TRUE, migrate_data => TRUE);
 SELECT create_hypertable('kalshi_perp_candles', by_range('ts', INTERVAL '1 day'),
                          if_not_exists => TRUE, migrate_data => TRUE);
+SELECT create_hypertable('poly_trades', by_range('ts', INTERVAL '1 day'),
+                         if_not_exists => TRUE, migrate_data => TRUE);
 
 -- Compression: rows grouped per market, newest first, which is how they are read.
 DO $$
@@ -22,7 +24,8 @@ DECLARE t record;
 BEGIN
     FOR t IN SELECT * FROM (VALUES ('kalshi_candles', 'ticker'),
                                    ('poly_candles', 'condition_id'),
-                                   ('kalshi_perp_candles', 'ticker')) v(tbl, seg)
+                                   ('kalshi_perp_candles', 'ticker'),
+                                   ('poly_trades', 'condition_id')) v(tbl, seg)
     LOOP
         IF NOT EXISTS (SELECT 1 FROM timescaledb_information.hypertables
                        WHERE hypertable_schema = current_schema()

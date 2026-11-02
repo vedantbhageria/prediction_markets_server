@@ -1,4 +1,4 @@
-# prediction_markets candle history. Fills every market's history on leftover budget. When it has nothing
+# prediction_markets history, Kalshi candles and Polymarket trades. Fills every market's history on leftover budget. When it has nothing
 # left it exits, and runs again 15 minutes later to fill whatever is new.
 #
 # Installed with the others by: sudo bash deploy/install-services.sh
@@ -16,7 +16,7 @@ User=theonealpha
 WorkingDirectory=/home/theonealpha/prediction_markets_server
 EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python backfill.py
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python backfill.py --venue all
 # SIGINT: each program finishes the request in hand and saves its place.
 KillSignal=SIGINT
 TimeoutStopSec=90

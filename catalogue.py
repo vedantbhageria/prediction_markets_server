@@ -15,6 +15,11 @@ already stored costs reads, not writes.
 Kalshi reads also record what they saw -- each market's volume, and when
 Kalshi was asked for it -- in kalshi_observations, tagged with the discovery
 scan they belong to. activity.py turns those into activity scores.
+
+Polymarket reads write their volumes straight into poly_tracking instead
+(_track_poly): Polymarket needs no scores -- its feed carries every market --
+only to know which markets traded, and roughly when, in case the feed missed
+it.
 """
 
 import queue
@@ -319,26 +324,87 @@ def _poly_rows(page):
     return events, markets
 
 
-def _write_poly(events, markets):
-    """Events first, then the markets that point at them."""
+def _start(m):
+    """When a Polymarket market started, as unix time, or None."""
+    for key in ("startDate", "createdAt"):
+        try:
+            return datetime.fromisoformat(m[key].replace("Z", "+00:00")).timestamp()
+        except (KeyError, AttributeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _track_poly(cur, markets, answered):
+    """Each market's volumes as read, into poly_tracking.
+
+    A market seen for the first time starts with its coverage at the moment it
+    was read -- or, if it began while the trade feed was already running, at
+    its start, which the feed has covered since. One never seen trading has
+    no history to fetch. A market already tracked whose total or 24-hour
+    volume went up is marked as having traded by the time of this reading.
+    """
+    if not markets:
+        return
+    floor = time.time() - settings.BACKFILL_DAYS * 86400
+    rows = []
+    for m in markets:
+        raw = m[-1].adapted
+        start = _start(raw)
+        rows.append((m[0], num(raw.get("volume")) or 0, num(raw.get("volume24hr")) or 0,
+                     datetime.fromtimestamp(max(floor, min(start or answered, answered)),
+                                            timezone.utc)))
+    rows.sort()
+    seen = cur.mogrify("%s::timestamptz", (datetime.fromtimestamp(answered, timezone.utc),)).decode()
+    cur.execute("SELECT 1 FROM poly_tracking WHERE condition_id = ANY(%s)"
+                " ORDER BY condition_id FOR UPDATE", ([r[0] for r in rows],))
+    execute_values(cur, f"""
+        INSERT INTO poly_tracking AS t (condition_id, volume, volume_24h, moved_at,
+                                        history_from, trades_from, trades_to)
+        SELECT v.c, v.vol::numeric, v.v24::numeric,
+               CASE WHEN v.vol::numeric > 0 OR v.v24::numeric > 0 THEN {seen} END,
+               v.hf::timestamptz,
+               CASE WHEN v.vol::numeric = 0 AND v.v24::numeric = 0 THEN v.hf::timestamptz
+                    WHEN v.hf::timestamptz >= f.covered_from THEN v.hf::timestamptz
+                    ELSE {seen} END,
+               CASE WHEN (v.vol::numeric > 0 OR v.v24::numeric > 0)
+                         AND v.hf::timestamptz >= f.covered_from THEN v.hf::timestamptz
+                    ELSE {seen} END
+        FROM (VALUES %s) AS v(c, vol, v24, hf)
+        LEFT JOIN poly_feed f ON true
+        WHERE EXISTS (SELECT 1 FROM poly_markets m WHERE m.condition_id = v.c)
+        ORDER BY v.c
+        ON CONFLICT (condition_id) DO UPDATE SET
+            volume = EXCLUDED.volume, volume_24h = EXCLUDED.volume_24h,
+            moved_at = CASE WHEN EXCLUDED.volume > t.volume OR EXCLUDED.volume_24h > t.volume_24h
+                            THEN GREATEST(t.moved_at, {seen}) ELSE t.moved_at END
+        WHERE t.volume IS DISTINCT FROM EXCLUDED.volume
+           OR t.volume_24h IS DISTINCT FROM EXCLUDED.volume_24h""", rows, page_size=1000)
+
+
+def _write_poly(events, markets, answered=None):
+    """Events first, then the markets that point at them, then -- for a read
+    made at `answered` -- what it says about their trading."""
     with connection() as conn:
         with conn.cursor() as cur:
             store.upsert(cur, "poly_events", POLY_EVENT_COLS, events, "event_id",
                          POLY_EVENT_WATCH)
-            return store.upsert(cur, "poly_markets", POLY_COLS, markets,
-                                "condition_id", POLY_WATCH)
+            n = store.upsert(cur, "poly_markets", POLY_COLS, markets,
+                             "condition_id", POLY_WATCH)
+            if answered is not None:
+                _track_poly(cur, markets, answered)
+            return n
 
 
 def sync_poly(stop=None, scan=None):
     """Everything open now, then a re-read of stored markets that left the
     open list since -- which is how their closed flag gets set."""
     seen, total = set(), 0
-    for page, _ in venues.poly_events(closed=False):
+    for page, _, asked, answered in _ahead(_timed(venues.poly_events(closed=False)), stop):
         if _stopped(stop):
             return total
         events, markets = _poly_rows(page)
         seen.update(row[0] for row in markets)
-        total += _write_poly(events, markets)
+        total += _write_poly(events, markets, answered)
 
     stale = {r["condition_id"]: r["event_id"] for r in db.query(
         "SELECT condition_id, event_id FROM poly_markets"
@@ -347,10 +413,12 @@ def sync_poly(stop=None, scan=None):
     rows = [_poly_row(m, stale[m["conditionId"]])
             for m in venues.poly_markets(list(stale)[:STALE_MAX])
             if m.get("conditionId") in stale]
+    answered = time.time()
     with connection() as conn:
         with conn.cursor() as cur:
             total += store.upsert(cur, "poly_markets", POLY_COLS, rows,
                                   "condition_id", POLY_WATCH)
+            _track_poly(cur, rows, answered)
     return total
 
 
@@ -361,11 +429,11 @@ def import_poly_closed(stop=None, since=None, progress=None, checkpoint=None, sc
     total = 0
     if progress.get("cursor") == "done":
         return total
-    for page, cursor in venues.poly_events(closed=True, end_date_min=since,
-                                           cursor=progress.get("cursor")):
+    for page, cursor, asked, answered in _ahead(_timed(venues.poly_events(
+            closed=True, end_date_min=since, cursor=progress.get("cursor"))), stop):
         if _stopped(stop):
             return total
-        total += _write_poly(*_poly_rows(page))
+        total += _write_poly(*_poly_rows(page), answered)
         progress.update(cursor=cursor or "done")
         if checkpoint:
             checkpoint()

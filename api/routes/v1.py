@@ -3,6 +3,11 @@
 Lists take `limit` and `page_token` (the previous page's next_page_token) and
 `format` = json, csv or parquet. Times go in as ISO 8601 or Unix seconds and
 come out as ISO 8601 in UTC; a candle is stamped with the start of its bucket.
+
+Both venues, one API. A Polymarket market is named by its condition id (0x...)
+wherever a ticker goes, so candles, latest and backfill take either venue's
+markets, mixed. Lists of markets take `venue` (kalshi by default, poly, or
+all); Polymarket's raw trades are at /v1/markets/{condition_id}/trades.
 """
 
 import json
@@ -12,6 +17,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Body, Depends, Path, Query, Request
 
+import poly
 import ratelimit
 import settings
 from api import candles as candle_reader
@@ -27,7 +33,9 @@ Format = Literal["json", "csv", "parquet"]
 FORMAT = Query("json", description="json, csv or parquet")
 LIMIT = Query(config.DEFAULT_ROWS, ge=1, le=config.MAX_ROWS)
 TOKEN = Query(None, description="next_page_token from the previous page")
-TICKER = Path(description="a Kalshi market ticker, e.g. KXBTCD-26NOV0117-T70000")
+TICKER = Path(description="a Kalshi market ticker, e.g. KXBTCD-26NOV0117-T70000, or a"
+                          " Polymarket condition id, 0x...")
+VENUE = Query("kalshi", description="kalshi, poly or all")
 
 
 def _offset(page_token):
@@ -52,7 +60,8 @@ def _names(value):
 def index():
     return {"version": 1, "docs": "/docs", "endpoints": [
         "GET /v1/markets", "GET /v1/markets/{ticker}", "GET /v1/markets/{ticker}/candles",
-        "GET /v1/markets/{ticker}/latest", "GET /v1/candles", "GET /v1/latest",
+        "GET /v1/markets/{ticker}/latest", "GET /v1/markets/{condition_id}/trades",
+        "GET /v1/candles", "GET /v1/latest",
         "GET /v1/events", "GET /v1/events/{event}", "GET /v1/series", "GET /v1/series/{series}",
         "GET /v1/categories", "GET /v1/hot", "GET /v1/status",
         "POST /v1/backfill", "GET /v1/backfill", "GET /v1/backfill/{job_id}"]}
@@ -64,14 +73,28 @@ def index():
 
 MARKET_COLUMNS = ["ticker", "event_ticker", "series_ticker", "category", "title", "status",
                   "result", "open_time", "close_time", "strike_type", "strike", "floor_strike",
-                  "cap_strike", "volume", "open_interest", "activity_score"]
+                  "cap_strike", "volume", "open_interest", "activity_score", "venue"]
 MARKET_SELECT = """
     SELECT m.ticker, m.event_ticker, e.series_ticker, e.category, m.title, m.status, m.result,
            m.open_time, m.close_time, m.strike_type, m.strike, m.floor_strike, m.cap_strike,
-           m.volume, m.open_interest, t.activity_score
+           m.volume, m.open_interest, t.activity_score, 'kalshi' AS venue
     FROM kalshi_markets m
     JOIN kalshi_events e USING (event_ticker)
     LEFT JOIN kalshi_tracking t USING (ticker)"""
+# Polymarket in the same columns: the condition id is the ticker, the event id
+# the event, the question the title; status is open or closed; volume is
+# Polymarket's (USDC) and activity_score its last 24 hours' volume.
+POLY_SELECT = f"""
+    SELECT m.condition_id AS ticker, m.event_id AS event_ticker, NULL::text AS series_ticker,
+           e.category, m.question AS title,
+           CASE WHEN m.closed THEN 'closed' ELSE 'open' END AS status, NULL::text AS result,
+           {candle_reader.POLY_START} AS open_time, m.end_date AS close_time, m.strike_type,
+           m.strike, NULL::numeric AS floor_strike, NULL::numeric AS cap_strike,
+           m.volume, NULL::numeric AS open_interest, t.volume_24h AS activity_score,
+           'poly' AS venue
+    FROM poly_markets m
+    LEFT JOIN poly_events e USING (event_id)
+    LEFT JOIN poly_tracking t USING (condition_id)"""
 SORTS = {"volume": "m.volume", "open_interest": "m.open_interest",
          "activity": "t.activity_score", "close_time": "m.close_time",
          "open_time": "m.open_time", "ticker": "m.ticker"}
@@ -87,8 +110,48 @@ def _status(where, params, status, table_alias="m"):
         params.append(_names(status))
 
 
+def _poly_markets(status, event, q, tickers, tag, closes_after, closes_before, min_volume, sort):
+    """WHERE and ORDER BY for Polymarket, from the same filters."""
+    where, params = [], []
+    if status == "open":
+        where.append("m.closed IS NOT TRUE")
+    elif status == "closed":
+        where.append("m.closed IS TRUE")
+    elif status:
+        raise ApiError(400, "invalid_parameter", "status: open or closed for Polymarket")
+    if event:
+        where.append("m.event_id = ANY(%s)")
+        params.append(_names(event))
+    if q:
+        where.append("(m.question ILIKE %s OR m.slug ILIKE %s OR m.condition_id ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%", f"{q}%"]
+    if tickers:
+        where.append("m.condition_id = ANY(%s)")
+        params.append(split_list(tickers, "tickers", config.MAX_ROWS))
+    if tag:
+        where.append("e.tags && %s::text[]")
+        params.append([t.lower() for t in _names(tag)])
+    for name, value, op in (("closes_after", closes_after, ">="),
+                            ("closes_before", closes_before, "<")):
+        ts = parse_time(value, name)
+        if ts is not None:
+            where.append(f"m.end_date {op} to_timestamp(%s)")
+            params.append(ts)
+    if min_volume is not None:
+        where.append("m.volume >= %s")
+        params.append(min_volume)
+    sorts = {"volume": "m.volume", "activity": "t.volume_24h", "close_time": "m.end_date",
+             "open_time": "open_time", "ticker": "m.condition_id", "open_interest": "m.volume"}
+    field = sorts.get(sort.lstrip("-"))
+    if field is None:
+        raise ApiError(400, "invalid_parameter", f"sort: one of {', '.join(SORTS)}")
+    order = f"{field} {'DESC' if sort.startswith('-') else 'ASC'} NULLS LAST, ticker"
+    return " AND ".join(where) or "true", params, order
+
+
 @router.get("/markets", tags=["markets"], summary="Search and filter markets")
-def markets(status: str | None = Query(None, description="open, closed, or Kalshi's own"
+def markets(venue: Literal["kalshi", "poly", "all"] = VENUE,
+            status: str | None = Query(None, description="open, closed, or Kalshi's own"
                                        " status (active, settled, ...)"),
             series: str | None = Query(None, description="series tickers, comma-separated"),
             event: str | None = Query(None, description="event tickers, comma-separated"),
@@ -97,9 +160,22 @@ def markets(status: str | None = Query(None, description="open, closed, or Kalsh
             tickers: str | None = Query(None, description="these markets, comma-separated"),
             closes_after: str | None = None, closes_before: str | None = None,
             min_volume: float | None = None,
+            tag: str | None = Query(None, description="Polymarket tags (slugs), comma-separated:"
+                                    " markets with any of them"),
             sort: str = Query("-volume", description="volume, open_interest, activity,"
                               " close_time, open_time or ticker; a leading - for descending"),
             limit: int = LIMIT, page_token: str | None = TOKEN, format: Format = FORMAT):
+    offset = _offset(page_token)
+    if venue != "kalshi":
+        pw, pp, porder = _poly_markets(status if venue == "poly" or status in ("open", "closed")
+                                       else None, event, q, tickers, tag, closes_after,
+                                       closes_before, min_volume, sort)
+        if venue == "poly":
+            with read() as cur:
+                cur.execute(f"{POLY_SELECT} WHERE {pw} ORDER BY {porder} LIMIT %s OFFSET %s",
+                            pp + [limit + 1, offset])
+                rows, nxt = _paged([clean(r) for r in cur.fetchall()], limit, offset)
+            return table(rows, MARKET_COLUMNS, format, key="markets", next_token=nxt)
     where, params = [], []
     _status(where, params, status)
     if series:
@@ -130,10 +206,23 @@ def markets(status: str | None = Query(None, description="open, closed, or Kalsh
     if field is None:
         raise ApiError(400, "invalid_parameter", f"sort: one of {', '.join(SORTS)}")
     order = f"{field} {'DESC' if sort.startswith('-') else 'ASC'} NULLS LAST, m.ticker"
-    offset = _offset(page_token)
     with read() as cur:
-        cur.execute(f"{MARKET_SELECT} WHERE {' AND '.join(where) or 'true'}"
-                    f" ORDER BY {order} LIMIT %s OFFSET %s", params + [limit + 1, offset])
+        if venue == "all":
+            # Both lists, merged on the sort: each side sorted and cut to the
+            # page's end, then the two put together and the page taken.
+            both = f"""({MARKET_SELECT} WHERE {' AND '.join(where) or 'true'}
+                         ORDER BY {order} LIMIT %s)
+                       UNION ALL
+                       ({POLY_SELECT} WHERE {pw} ORDER BY {porder} LIMIT %s)"""
+            outer = sort.lstrip("-") if sort.lstrip("-") != "activity" else "activity_score"
+            cur.execute(f"SELECT * FROM ({both}) x ORDER BY {outer}"
+                        f" {'DESC' if sort.startswith('-') else 'ASC'} NULLS LAST, ticker"
+                        f" LIMIT %s OFFSET %s",
+                        params + [offset + limit + 1] + pp + [offset + limit + 1,
+                                                             limit + 1, offset])
+        else:
+            cur.execute(f"{MARKET_SELECT} WHERE {' AND '.join(where) or 'true'}"
+                        f" ORDER BY {order} LIMIT %s OFFSET %s", params + [limit + 1, offset])
         rows, nxt = _paged([clean(r) for r in cur.fetchall()], limit, offset)
     return table(rows, MARKET_COLUMNS, format, key="markets", next_token=nxt)
 
@@ -154,9 +243,52 @@ def _hot():
     return _hot_cache
 
 
+def _poly_market(cid, include_raw):
+    with read() as cur:
+        cur.execute(f"""
+            SELECT m.*, {candle_reader.POLY_START} AS open_time, e.slug AS event_slug,
+                   e.title AS event_title, e.category, e.tags,
+                   t.volume_24h, t.moved_at, t.history_from, t.mid_to,
+                   CASE WHEN t.mid_to >= t.trades_from THEN t.history_from
+                        ELSE t.trades_from END AS fetched_from,
+                   poly_covered_to(t.trades_to) AS fetched_to
+            FROM poly_markets m
+            LEFT JOIN poly_events e USING (event_id)
+            LEFT JOIN poly_tracking t USING (condition_id)
+            WHERE m.condition_id = %s""", (cid,))
+        row = cur.fetchone()
+    if not row:
+        not_found("market", cid)
+    r = clean(row)
+    raw = row["raw"] or {}
+
+    def parsed(key):
+        try:
+            return json.loads(raw.get(key) or "null")
+        except (TypeError, ValueError):
+            return None
+    out = {"ticker": cid, "venue": "poly", "slug": r["slug"], "title": r["question"],
+           "status": "closed" if r["closed"] else "open", "open_time": r["open_time"],
+           "close_time": r["end_date"], "strike_type": r["strike_type"], "strike": r["strike"],
+           "volume": r["volume"], "volume_24h": r["volume_24h"], "liquidity": r["liquidity"],
+           "outcomes": parsed("outcomes"), "token_ids": parsed("clobTokenIds"),
+           "outcome_prices": parsed("outcomePrices"), "yes_token_id": r["yes_token_id"],
+           "rules": raw.get("description"), "resolution_source": raw.get("resolutionSource"),
+           "event": {"event_ticker": r["event_id"], "slug": r["event_slug"],
+                     "title": r["event_title"], "category": r["category"], "tags": r["tags"]},
+           "activity": {"volume_24h": r["volume_24h"], "traded_by": r["moved_at"]},
+           "candles": {"from": r["fetched_from"], "to": r["fetched_to"],
+                       "midpoints_until": r["mid_to"] if r["mid_to"] else None}}
+    if include_raw:
+        out["raw"] = raw
+    return json_response(out)
+
+
 @router.get("/markets/{ticker}", tags=["markets"], summary="One market in full")
 def market(ticker: str = TICKER,
-           include_raw: bool = Query(False, description="add Kalshi's own payload")):
+           include_raw: bool = Query(False, description="add the venue's own payload")):
+    if candle_reader.venue_of(ticker) == "poly":
+        return _poly_market(ticker, include_raw)
     with read() as cur:
         cur.execute("""
             SELECT m.*, e.series_ticker, e.title AS event_title, e.sub_title, e.category,
@@ -406,7 +538,7 @@ LATEST_COLUMNS = ["ticker", "status", "close_time", "volume", "open_interest", "
 def _latest(tickers):
     with read() as cur:
         cur.execute("""
-            SELECT m.ticker, m.status, m.close_time, m.volume, m.open_interest,
+            SELECT q.n, m.ticker, m.status, m.close_time, m.volume, m.open_interest,
                    c.ts AS last_trade_ts, c.close AS last_price, c.volume AS last_minute_volume,
                    c.open, c.high, c.low, c.open_interest AS candle_open_interest,
                    t.candles_fetched_to AS candles_to
@@ -416,8 +548,19 @@ def _latest(tickers):
             LEFT JOIN LATERAL (
                 SELECT * FROM kalshi_candles k WHERE k.ticker = m.ticker
                 ORDER BY k.ts DESC LIMIT 1) c ON true
-            ORDER BY q.n""", (tickers,))
-        return [clean(r) for r in cur.fetchall()]
+            UNION ALL
+            SELECT q.n, m.condition_id, CASE WHEN m.closed THEN 'closed' ELSE 'open' END,
+                   m.end_date, m.volume, NULL::numeric,
+                   c.ts, c.close, c.volume, c.open, c.high, c.low, NULL::numeric,
+                   poly_covered_to(t.trades_to)
+            FROM unnest(%s::text[]) WITH ORDINALITY AS q(ticker, n)
+            JOIN poly_markets m ON m.condition_id = q.ticker
+            LEFT JOIN poly_tracking t USING (condition_id)
+            LEFT JOIN LATERAL (
+                SELECT * FROM poly_candles k WHERE k.condition_id = m.condition_id
+                ORDER BY k.ts DESC LIMIT 1) c ON true
+            ORDER BY n""", (tickers, tickers))
+        return [{k: v for k, v in clean(r).items() if k != "n"} for r in cur.fetchall()]
 
 
 @router.get("/markets/{ticker}/latest", tags=["candles"],
@@ -446,6 +589,55 @@ def latest(tickers: str = Query(description="up to 1,000, comma-separated"),
     if missing:
         raise ApiError(404, "not_found", "not in the store: " + ", ".join(missing[:20]))
     return table(rows, LATEST_COLUMNS, format, key="latest")
+
+
+TRADE_COLUMNS = ["ts", "outcome", "side", "price", "yes_price", "size", "notional", "wallet",
+                 "tx_hash"]
+
+
+@router.get("/markets/{ticker}/trades", tags=["candles"],
+            summary="Every stored trade of one Polymarket market, oldest first")
+def market_trades(ticker: str = TICKER, start: str | None = START, end: str | None = END,
+                  limit: int = CANDLE_LIMIT, page_token: str | None = TOKEN,
+                  format: Format = FORMAT):
+    """Each row is one taker's order as filled: `price` in the token traded,
+    `yes_price` the same trade as a price of the market's first outcome,
+    `size` in shares, `notional` the USDC paid. `wallet` is the taker's
+    Polymarket proxy wallet; `tx_hash` the Polygon transaction."""
+    if candle_reader.venue_of(ticker) != "poly":
+        raise ApiError(400, "invalid_parameter", "trades are stored for Polymarket markets"
+                       " (condition ids, 0x...) only; Kalshi gives candles")
+    a, b = parse_time(start, "start"), parse_time(end, "end")
+    state = read_token(page_token)
+    with read() as cur:
+        cur.execute("SELECT yes_token_id, outcomes FROM (SELECT yes_token_id,"
+                    " raw->>'outcomes' AS outcomes, raw->>'clobTokenIds' AS tokens"
+                    " FROM poly_markets WHERE condition_id = %s) m", (ticker,))
+        m = cur.fetchone()
+        if not m:
+            not_found("market", ticker)
+        cur.execute("""
+            SELECT ts, token_id, side, price, size, wallet, tx_hash, trade_id FROM poly_trades
+            WHERE condition_id = %s AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)
+              AND (ts, trade_id) > (to_timestamp(%s), %s)
+            ORDER BY ts, trade_id LIMIT %s""",
+                    (ticker, a if a is not None else 0, b if b is not None else time.time() + 86400,
+                     float(state.get("t", 0)), state.get("i", ""), limit + 1))
+        got = cur.fetchall()
+    rows = []
+    for r in got[:limit]:
+        yes = m["yes_token_id"] is None or r["token_id"] == m["yes_token_id"]
+        price = float(r["price"])
+        rows.append({"ts": r["ts"], "outcome": 0 if yes else 1, "side": r["side"], "price": price,
+                     "yes_price": price if yes else round(1 - price, 6),
+                     "size": float(r["size"]), "notional": round(float(r["size"]) * price, 6),
+                     "wallet": r["wallet"], "tx_hash": r["tx_hash"]})
+    nxt = None
+    if len(got) > limit:
+        last = got[limit - 1]
+        nxt = make_token(t=last["ts"].timestamp(), i=last["trade_id"])
+    return table(rows, TRADE_COLUMNS, format, key="trades", next_token=nxt,
+                 meta={"ticker": ticker})
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +703,35 @@ def status():
     out["store"] = {"markets_about": counts["markets"],
                     "markets_behind": counts["behind"]}
     out["backfill_jobs"] = {"queued": counts["jobs_queued"], "running": counts["jobs_running"]}
+    out["poly"] = _poly_status(now)
     return json_response(out)
+
+
+def _poly_status(now):
+    """Polymarket's side: the trade feed, catching up, candles waiting, budget."""
+    try:
+        down = ratelimit.client().get(f"{settings.REDIS_PREFIX}down:data-api.polymarket.com")
+        route = ratelimit.client().get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com")
+        used = {s: ratelimit.used(s, 1, "poly") for s in ratelimit.SHARE}
+        factor = ratelimit.factor("poly")
+    except Exception:
+        down = route = factor = None
+        used = {}
+    with read() as cur:
+        cur.execute(f"""
+            SELECT (SELECT covered_to FROM poly_feed) AS feed_to,
+                   (SELECT updated_at FROM poly_feed) AS feed_at,
+                   (SELECT count(*) FROM poly_tracking t WHERE {poly.HISTORY_DONE}
+                       AND {poly.BEHIND}) AS behind,
+                   (SELECT count(*) FROM poly_dirty) AS minutes_waiting""")
+        c = cur.fetchone()
+    return {"reachable": down is None, "route": route or "direct",
+            "feed": None if c["feed_to"] is None else {
+                "covered_to": iso(c["feed_to"]), "read_at": iso(c["feed_at"]),
+                "behind_seconds": round(now - c["feed_to"].timestamp())},
+            "markets_behind": c["behind"], "minutes_waiting_for_candles": c["minutes_waiting"],
+            "budget": {"requests_per_min": settings.POLY_REQUESTS_PER_MIN, "factor": factor,
+                       "used_last_minute": used}}
 
 
 # ---------------------------------------------------------------------------
