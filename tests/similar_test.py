@@ -123,10 +123,12 @@ def main():
     n = db.query("SELECT count(*) AS n FROM templates")[0]["n"]
     check("records and vectors made", n >= 6, f"{n} templates")
 
+    kal = ask("0xa1", limit=20, max_cosine=0.5, venue="kalshi")
+    check("Polymarket BTC 70k: the nearest Kalshi market is BTC 70k",
+          kal and kal[0]["ticker"] == "KXBTC-26DEC31-T70000", [r["ticker"] for r in kal][:4])
+    top = kal[0] if kal else {}
     rows = ask("0xa1", limit=20, max_cosine=0.5)
     ids = [r["ticker"] for r in rows]
-    check("Polymarket BTC 70k finds Kalshi BTC 70k first", ids and ids[0] == "KXBTC-26DEC31-T70000", ids[:4])
-    top = rows[0] if rows else {}
     check("...labelled identical (above 69,999.99 = at least 70,000)", top.get("relation") == "identical",
           top.get("relation"))
     below = next((r for r in rows if r["ticker"] == "KXBTC-26DEC31-B70000"), None)

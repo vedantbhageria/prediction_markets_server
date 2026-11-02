@@ -203,12 +203,12 @@ def _thresholds(a, b, when):
         return "related", "levels or units not comparable"
     # "above 69,999.99" and "at least 70,000" are one question on whole cents.
     if ca in UP and cb in UP:
-        if _close(la, lb) or (ca != cb and abs(la - lb) <= 0.01):
+        if _close(la, lb) or abs(la - lb) <= 0.01:
             return ("identical" if when == "same" else "related",
                     "same direction and level" + ("" if when == "same" else ", different timing"))
         return ("nested" if when == "same" else "related", "same direction, different level")
     if ca in DOWN and cb in DOWN:
-        if _close(la, lb) or (ca != cb and abs(la - lb) <= 0.01):
+        if _close(la, lb) or abs(la - lb) <= 0.01:
             return ("identical" if when == "same" else "related", "same direction and level")
         return ("nested" if when == "same" else "related", "same direction, different level")
     if (ca in UP and cb in DOWN) or (ca in DOWN and cb in UP):

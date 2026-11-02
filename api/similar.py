@@ -20,7 +20,7 @@
    and those make one distance to sort by:
 
        distance = text + 0.10 * min(days, 730) / 365
-                       + 0.20 * min(level, 1) + (0.05 if opposite)
+                       + 0.50 * min(level, 1) + (0.05 if opposite)
 
 4. The limits asked for drop what is too far: max_cosine on text, max_days
    on days, max_level on level. A limit applies only where both markets have
@@ -90,7 +90,7 @@ def _opposite(a, b):
 
 
 def distance(text, days, level, opposite):
-    return (text + 0.10 * min(days or 0, 730) / 365 + 0.20 * min(level or 0, 1)
+    return (text + 0.10 * min(days or 0, 730) / 365 + 0.50 * min(level or 0, 1)
             + (0.05 if opposite else 0))
 
 
