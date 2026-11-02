@@ -92,6 +92,22 @@ def stems(template, entity=None):
     return out
 
 
+# Time zones and clock words are not names.
+NOT_NAMES = {"et", "est", "edt", "pt", "pst", "pdt", "ct", "cst", "cdt", "mt", "mst", "mdt",
+             "utc", "gmt", "bst", "cet", "am", "pm", "noon", "midnight"}
+CLOCK = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b", re.I)
+
+
+def clock_times(template):
+    """The times of day a question names, as minutes after midnight, time zone
+    aside: '2PM ET' -> {840}. Empty if it names none."""
+    out = set()
+    for h, m, ap in CLOCK.findall(template or ""):
+        h = int(h) % 12 + (12 if ap.lower() == "p" else 0)
+        out.add(h * 60 + int(m or 0))
+    return out
+
+
 def names(template, entity=None):
     """Stems of the capitalised words after the first: the places, people and
     organisations a question names ("California", "SpaceX")."""
@@ -102,7 +118,7 @@ def names(template, entity=None):
     out = set()
     for w in found[1:] if t.strip()[:1].isupper() else found:
         w = ALIASES.get(norm(w), norm(w)).replace("’", "").replace("'", "")
-        if w and w not in STEM_STOP:
+        if w and w not in STEM_STOP and w not in NOT_NAMES:
             out.update(x[:6] for x in w.split())
     return out
 
@@ -122,7 +138,10 @@ def question_similarity(a, b):
     na = names(a.get("template"), a.get("entity"))
     nb = names(b.get("template"), b.get("entity"))
     named = na <= sb or nb <= sa
-    return len(sa & sb) / len(sa | sb), crit_a == crit_b, named
+    # Both name a time of day and the times differ: not the same moment.
+    ta, tb = clock_times(a.get("template")), clock_times(b.get("template"))
+    same_clock = not (ta and tb) or ta == tb
+    return len(sa & sb) / len(sa | sb), crit_a == crit_b and same_clock, named
 
 
 def same_thing(a, b):
