@@ -130,10 +130,16 @@ def embed(stop=None):
     """A vector for every template that has none. Returns how many were made."""
     vector = store.has_vector()
     table = "templates" if vector else "template_vectors"
+    # Open markets' questions first: those are the ones searched from.
     todo = [r["template"] for r in db.query(f"""
-        SELECT DISTINCT p.template FROM propositions p
+        SELECT p.template,
+               bool_or(COALESCE(k.close_time > now(), pm.closed IS NOT TRUE, false)) AS open
+        FROM propositions p
+        LEFT JOIN kalshi_markets k ON p.venue = 'kalshi' AND k.ticker = p.market_id
+        LEFT JOIN poly_markets pm ON p.venue = 'poly' AND pm.condition_id = p.market_id
         WHERE p.template IS NOT NULL AND NOT p.placeholder
-          AND NOT EXISTS (SELECT 1 FROM {table} v WHERE v.template = p.template)""")]
+          AND NOT EXISTS (SELECT 1 FROM {table} v WHERE v.template = p.template)
+        GROUP BY p.template ORDER BY open DESC""")]
     made, started = 0, time.time()
     for i in range(0, len(todo), 2000):
         if stop is not None and stop.is_set():
