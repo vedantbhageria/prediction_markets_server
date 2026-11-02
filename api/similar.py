@@ -116,17 +116,26 @@ def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
                        " ten minutes of the market being listed)")
     me = _record(me)
 
+    # Each venue x status slice has its own index (vector.sql), searched only
+    # if asked for: filtering after one search over everything could leave
+    # nothing (the nearest 200 all on the other venue, or all closed).
+    venues = ["kalshi", "poly"] if venue == "all" else [venue]
+    states = ["open", "closed"] if status == "all" else [status]
     k = min(MAX_TEMPLATES, max(200, limit * 20))
     cur.execute("SET LOCAL hnsw.ef_search = %s", (k,))
-    cur.execute("""SELECT template, embedding <=> %s::vector AS d FROM templates
-                   ORDER BY embedding <=> %s::vector LIMIT %s""",
-                (me["embedding"], me["embedding"], k))
-    near = {r["template"]: float(r["d"]) for r in cur.fetchall()
-            if max_cosine is None or float(r["d"]) <= max_cosine}
+    near = {}
+    for v in venues:
+        for st in states:
+            cur.execute(f"""SELECT template, embedding <=> %s::vector AS d FROM templates
+                            WHERE {v}_{st} ORDER BY embedding <=> %s::vector LIMIT %s""",
+                        (me["embedding"], me["embedding"], k))
+            for r in cur.fetchall():
+                d = float(r["d"])
+                if max_cosine is None or d <= max_cosine:
+                    near[r["template"]] = d
     if not near:
         return [], me
 
-    venues = ["kalshi", "poly"] if venue == "all" else [venue]
     where = {"open": " AND m_open", "closed": " AND NOT m_open", "all": ""}[status]
     candidates = []
     for v in venues:

@@ -15,8 +15,26 @@ CREATE TABLE IF NOT EXISTS templates (
     embedding    vector(384) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS templates_embedding_idx
-    ON templates USING hnsw (embedding vector_cosine_ops);
+-- Which markets each template has, kept current by match.py as markets close.
+-- An HNSW index finds the nearest vectors first and filters after, so a search
+-- for open Kalshi markets alone through one index over everything could come
+-- back empty: Polymarket's hourly crypto questions, or Kalshi's thousands of
+-- closed ones, would fill every slot. One partial index per slice instead,
+-- and a search reads only the slices it asked for.
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS kalshi_open BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS kalshi_closed BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS poly_open BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS poly_closed BOOLEAN NOT NULL DEFAULT false;
+
+DROP INDEX IF EXISTS templates_embedding_idx;
+CREATE INDEX IF NOT EXISTS templates_kalshi_open_idx
+    ON templates USING hnsw (embedding vector_cosine_ops) WHERE kalshi_open;
+CREATE INDEX IF NOT EXISTS templates_kalshi_closed_idx
+    ON templates USING hnsw (embedding vector_cosine_ops) WHERE kalshi_closed;
+CREATE INDEX IF NOT EXISTS templates_poly_open_idx
+    ON templates USING hnsw (embedding vector_cosine_ops) WHERE poly_open;
+CREATE INDEX IF NOT EXISTS templates_poly_closed_idx
+    ON templates USING hnsw (embedding vector_cosine_ops) WHERE poly_closed;
 
 -- Vectors made before pgvector was there (plain arrays) move across once.
 DO $$

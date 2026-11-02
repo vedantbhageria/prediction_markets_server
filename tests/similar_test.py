@@ -152,6 +152,9 @@ def main():
           closed and all(r["status"] == "closed" for r in closed), [r["ticker"] for r in closed])
     both = {r["ticker"] for r in ask("0xa1", limit=50, max_cosine=0.5, status="all")}
     check("status=all includes open and closed", {"0xd1", "KXBTC-26DEC31-T70000"} <= both, both)
+    crowd = ask("0xa1", limit=5, max_cosine=0.5, venue="kalshi", status="open")
+    check("a venue search is not crowded out by the other venue's nearer markets",
+          any(r["ticker"] == "KXBTC-26DEC31-T70000" for r in crowd), [r["ticker"] for r in crowd])
     near_days = ask("0xa1", limit=20, max_cosine=0.5, max_days=30)
     check("max_days=30 drops June", all(r["ticker"] != "KXBTC-26JUN30-T70000" for r in near_days))
     near_level = ask("0xa1", limit=20, max_cosine=0.5, max_level=0.05)

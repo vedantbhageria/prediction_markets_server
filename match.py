@@ -161,13 +161,55 @@ def embed(stop=None):
         made += len(chunk)
         log.info("embedded %s of %s templates, %.0f/s", f"{made:,}", f"{len(todo):,}",
                  made / max(time.time() - started, 1e-9))
+        if vector and made % 40_000 == 0:
+            refresh_flags()         # so a long run's new vectors are searchable as it goes
     return made
+
+
+FLAGS = """
+    WITH have AS (
+        SELECT p.template,
+               bool_or(p.venue = 'kalshi' AND k.close_time > now()) AS kalshi_open,
+               bool_or(p.venue = 'kalshi' AND k.close_time <= now()) AS kalshi_closed,
+               bool_or(p.venue = 'poly' AND pm.closed IS NOT TRUE) AS poly_open,
+               bool_or(p.venue = 'poly' AND pm.closed IS TRUE) AS poly_closed
+        FROM propositions p
+        LEFT JOIN kalshi_markets k ON p.venue = 'kalshi' AND k.ticker = p.market_id
+        LEFT JOIN poly_markets pm ON p.venue = 'poly' AND pm.condition_id = p.market_id
+        WHERE NOT p.placeholder AND p.template IS NOT NULL
+        GROUP BY p.template)
+    UPDATE templates t SET
+        kalshi_open = COALESCE(h.kalshi_open, false), kalshi_closed = COALESCE(h.kalshi_closed, false),
+        poly_open = COALESCE(h.poly_open, false), poly_closed = COALESCE(h.poly_closed, false)
+    FROM (SELECT t2.template, h.kalshi_open, h.kalshi_closed, h.poly_open, h.poly_closed
+          FROM templates t2 LEFT JOIN have h USING (template)) h
+    WHERE t.template = h.template
+      AND (t.kalshi_open, t.kalshi_closed, t.poly_open, t.poly_closed) IS DISTINCT FROM
+          (COALESCE(h.kalshi_open, false), COALESCE(h.kalshi_closed, false),
+           COALESCE(h.poly_open, false), COALESCE(h.poly_closed, false))"""
+
+
+def refresh_flags():
+    """Which slices (venue x open/closed) each template's markets are in, so
+    each slice's index holds exactly its templates. Returns rows changed."""
+    if not store.has_vector():
+        return 0
+    started = time.time()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(FLAGS)
+            n = cur.rowcount
+    if n:
+        log.info("slices: %s templates moved (markets opened or closed), %.0fs", f"{n:,}",
+                 time.time() - started)
+    return n
 
 
 def run_once(stop=None):
     for venue in ("kalshi", "poly"):
         build(venue)
     embed(stop)
+    refresh_flags()
 
 
 def report():
