@@ -331,10 +331,11 @@ CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
 
 
 -- ---------------------------------------------------------------------------
--- Matching markets within and across venues (match.py). Every market as one
--- record (propositions.py explains each field); `sources` says, field by
--- field, whether the venue sent it ("native") or it was read from the wording
--- ("regex"). The vectors live in vector.sql, applied only where pgvector is.
+-- Similar markets, within and across venues (match.py, api/similar.py). Every
+-- market as one record (propositions.py explains each field); `sources` says,
+-- field by field, whether the venue sent it ("native") or it was read from
+-- the wording ("regex"). Each record's template has one vector in `templates`
+-- (vector.sql, applied once pgvector is enabled).
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS propositions (
@@ -361,30 +362,19 @@ CREATE TABLE IF NOT EXISTS propositions (
 CREATE INDEX IF NOT EXISTS propositions_template_idx ON propositions (template);
 CREATE INDEX IF NOT EXISTS propositions_group_idx ON propositions (venue, group_id);
 
--- One embedding per distinct template (a whole ladder of strikes shares one).
--- Searched in memory by match.py; pgvector would only add instant lookups.
-CREATE TABLE IF NOT EXISTS template_vectors (
-    template  TEXT PRIMARY KEY,
-    model     TEXT NOT NULL,
-    vec       REAL[] NOT NULL
-);
-
--- How two markets relate (relate.py): a is never after b in (venue,
--- market_id) order, so each pair is stored once. score is the embedding
--- similarity of their templates that proposed the pair.
-CREATE TABLE IF NOT EXISTS matches (
-    a_venue   TEXT NOT NULL,
-    a_market  TEXT NOT NULL,
-    b_venue   TEXT NOT NULL,
-    b_market  TEXT NOT NULL,
-    label     TEXT NOT NULL,
-    reason    TEXT,
-    score     REAL,
-    made_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (a_venue, a_market, b_venue, b_market)
-);
-CREATE INDEX IF NOT EXISTS matches_b_idx ON matches (b_venue, b_market);
-CREATE INDEX IF NOT EXISTS matches_label_idx ON matches (label);
+-- Template embeddings kept as plain arrays until pgvector is enabled; then
+-- vector.sql moves them into `templates` and drops this (so it is only made
+-- while `templates` does not exist).
+DO $$
+BEGIN
+    IF to_regclass('templates') IS NULL THEN
+        CREATE TABLE IF NOT EXISTS template_vectors (
+            template  TEXT PRIMARY KEY,
+            model     TEXT NOT NULL,
+            vec       REAL[] NOT NULL
+        );
+    END IF;
+END $$;
 
 
 -- ---------------------------------------------------------------------------

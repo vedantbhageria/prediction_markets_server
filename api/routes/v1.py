@@ -21,6 +21,7 @@ import poly
 import ratelimit
 import settings
 from api import candles as candle_reader
+from api import similar as similar_markets
 from api import config, jobs
 from api.common import (ApiError, clean, iso, json_response, make_token, not_found,
                         parse_time, read, read_token, require_full, require_key,
@@ -60,7 +61,8 @@ def _names(value):
 def index():
     return {"version": 1, "docs": "/docs", "endpoints": [
         "GET /v1/markets", "GET /v1/markets/{ticker}", "GET /v1/markets/{ticker}/candles",
-        "GET /v1/markets/{ticker}/latest", "GET /v1/markets/{condition_id}/trades",
+        "GET /v1/markets/{ticker}/latest", "GET /v1/markets/{ticker}/similar",
+        "GET /v1/markets/{condition_id}/trades",
         "GET /v1/candles", "GET /v1/latest",
         "GET /v1/events", "GET /v1/events/{event}", "GET /v1/series", "GET /v1/series/{series}",
         "GET /v1/categories", "GET /v1/hot", "GET /v1/status",
@@ -589,6 +591,47 @@ def latest(tickers: str = Query(description="up to 1,000, comma-separated"),
     if missing:
         raise ApiError(404, "not_found", "not in the store: " + ", ".join(missing[:20]))
     return table(rows, LATEST_COLUMNS, format, key="latest")
+
+
+@router.get("/markets/{ticker}/similar", tags=["markets"],
+            summary="The markets nearest to this one, on either venue")
+def market_similar(ticker: str = TICKER,
+                   limit: int = Query(50, ge=1, le=1000),
+                   venue: Literal["kalshi", "poly", "all"] = Query(
+                       "all", description="search Kalshi, Polymarket or both"),
+                   status: Literal["open", "closed", "all"] = Query(
+                       "open", description="markets still open, closed, or both"),
+                   max_cosine: float | None = Query(
+                       0.3, ge=0, le=2, description="largest text distance (cosine) kept;"
+                       " 0 = same wording"),
+                   max_days: float | None = Query(
+                       None, ge=0, description="largest gap in days between the dates the"
+                       " questions turn on"),
+                   max_level: float | None = Query(
+                       None, ge=0, description="largest relative gap between thresholds,"
+                       " e.g. 0.1 = 10%"),
+                   gates: str | None = Query(
+                       None, description="subject, keywords (comma-separated): drop pairs"
+                       " about a different subject, or whose key words or names differ"),
+                   format: Format = FORMAT):
+    """Nearest first, by one distance made of the text, timing and level gaps
+    (each also given on its own). See /docs for the formula. `relation` reads
+    how the two questions relate, from their fields; it filters nothing."""
+    wanted = set(_names(gates) or [])
+    unknown = wanted - {"subject", "keywords"}
+    if unknown:
+        raise ApiError(400, "invalid_parameter",
+                       f"gates: subject and/or keywords, not {', '.join(sorted(unknown))}")
+    with read() as cur:
+        rows, me = similar_markets.similar(cur, ticker, limit, venue, status, max_cosine,
+                                           max_days, max_level, wanted)
+    asked = {k: me.get(k) for k in ("venue", "kind", "subject", "entity", "comparator", "low",
+                                     "high", "unit", "when", "when_kind", "template")}
+    return table(rows, similar_markets.COLUMNS, format, key="markets",
+                 meta={"ticker": ticker, "market": clean(asked),
+                       "limits": {"max_cosine": max_cosine, "max_days": max_days,
+                                  "max_level": max_level, "gates": sorted(wanted),
+                                  "venue": venue, "status": status}})
 
 
 TRADE_COLUMNS = ["ts", "outcome", "side", "price", "yes_price", "size", "notional", "wallet",

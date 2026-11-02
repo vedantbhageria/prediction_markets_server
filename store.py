@@ -34,6 +34,7 @@ VENUES = {
 
 
 TIMESCALE_SQL = paths.ROOT / "timescale.sql"
+VECTOR_SQL = paths.ROOT / "vector.sql"
 # (rollup, end offset, how often it refreshes)
 ROLLUPS = [("kalshi_candles_5m", "5 minutes", "5 minutes"),
            ("kalshi_candles_15m", "15 minutes", "15 minutes"),
@@ -86,10 +87,19 @@ def ensure_schema():
             pool.putconn(holder)
 
 
+def has_vector():
+    """Is pgvector enabled in this database? (Enabling it needs a superuser.)"""
+    return bool(db.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'"))
+
+
 def _ensure_schema():
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(paths.SCHEMA.read_text(encoding="utf-8"))
+    if has_vector():
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(VECTOR_SQL.read_text(encoding="utf-8"))
     if not has_timescale():
         return False
 

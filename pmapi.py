@@ -23,6 +23,9 @@ Polymarket too, through the same calls: its markets are named by condition id
     pm.candles("0x5f6e...", "5m")                     # made from every trade
     pm.trades("0x5f6e...", start="2026-11-01")        # each trade, with wallet
 
+    pm.similar("KXBTCD-...", venue="poly", max_days=3, gates="subject")
+                                                      # nearest markets, nearest first
+
 Every list is fetched page by page until it ends (or `max_rows`), so a call
 returns everything it asked for. Times can be strings, datetimes, pandas
 Timestamps or Unix seconds; naive ones are taken as UTC.
@@ -223,6 +226,24 @@ class Client:
         """One column per ticker, indexed by ts: ready to compare or correlate."""
         df = self.candles(list(_tickers(tickers)), interval, start, end, fill)
         return df.pivot(index="ts", columns="ticker", values=field)
+
+    def similar(self, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
+                max_days=None, max_level=None, gates=None):
+        """The markets nearest to this one, nearest first, as a DataFrame.
+
+        venue: "kalshi", "poly" or "all". status: "open", "closed" or "all".
+        max_cosine: largest text distance (0 = same wording). max_days:
+        largest gap between the dates the questions turn on. max_level:
+        largest relative gap between thresholds (0.1 = 10%). gates: "subject"
+        and/or "keywords" to drop near-misses. Columns: text, days, level,
+        opposite, the combined distance, and `relation` (identical,
+        complement, nested, overlapping, same_outcome, related)."""
+        if gates is not None and not isinstance(gates, str):
+            gates = ",".join(gates)
+        r = self._get(f"/v1/markets/{ticker}/similar", limit=limit, venue=venue, status=status,
+                      max_cosine=max_cosine, max_days=max_days, max_level=max_level,
+                      gates=gates, format=_WIRE)
+        return self._frame(r, "markets")
 
     def trades(self, condition_id, start=None, end=None, max_rows=None):
         """Every stored trade of one Polymarket market, oldest first: price in
