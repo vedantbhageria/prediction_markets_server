@@ -29,12 +29,9 @@ KALSHI_BATCH = 100      # tickers per /markets or /markets/candlesticks request
 KALSHI_MAX_CANDLES = 10_000     # market-minutes one candlesticks request may ask for
 POLY_BATCH = 400        # tokens per /midpoints request; the API rejects ~1000
 # The trade lists refuse an offset past POLY_MAX_OFFSET and a page over
-# POLY_MAX_PAGE, so the newest 20,000 trades are all that can be reached, on
-# the whole feed or for one market. They are read in these (offset, limit)
-# steps: small pages first, as most reads need only those, then large ones.
-POLY_MAX_OFFSET = 10_000
+# POLY_MAX_PAGE (see settings.POLY_LIST_SIZES for how they are read).
+POLY_MAX_OFFSET = settings.POLY_MAX_OFFSET
 POLY_MAX_PAGE = 10_000
-POLY_PAGES = settings.POLY_PAGES
 GAMMA_BATCH = 50        # condition ids per /markets request
 
 

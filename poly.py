@@ -6,7 +6,7 @@ stored trades into candles; nothing here makes candles, except the midpoint
 fallback below.
 
 Two ways to read trades, both newest first and both cut off by the venue at
-the newest ~20,000 (venues.POLY_MAX_OFFSET + the last page):
+the newest ~20,000 (see read_list):
 
     the feed      every trade on Polymarket -- about 15 a second, so the cut-off
                   is ~20 minutes back. trades.py reads it every few seconds.
@@ -64,11 +64,10 @@ def row(t):
         return None
 
 
-# Pages of a trade list overlap by this many trades, so a page answered by a
-# staler copy than the page before it -- whose offsets have shifted -- is
-# caught instead of silently skipping the trades in between.
+# The page past the largest single request must share this many trades with
+# it: a page from a staler copy of the venue would otherwise skip trades.
 OVERLAP = 50
-STEP_BACK_TRIES = 6
+DEEP_TRIES = 4
 
 
 def read_list(market, since, stop=None):
@@ -77,35 +76,35 @@ def read_list(market, since, stop=None):
     it goes). Returns (trades, reached): `reached` is False if the list was cut
     off before getting there.
 
-    Every page after the first must share a trade with what is already read.
-    If it does not, the copy that answered is staler than the one before and
-    its offsets point further back than they should: the page is asked for
-    again from further forward until it overlaps."""
-    out, seen = [], set()
-    for offset, limit in venues.POLY_PAGES:
-        if not out:
-            asked = limit
-            page = venues.poly_trades(market, offset, asked, stop)
-        else:
-            o, tries = max(0, offset - OVERLAP), 0
-            asked = min(limit + OVERLAP, venues.POLY_MAX_PAGE)
-            while True:
-                page = venues.poly_trades(market, o, asked, stop)
-                if not page or any(_key(t) in seen for t in page):
-                    break
-                tries += 1
-                if tries >= STEP_BACK_TRIES or o == 0:
-                    log.warning("trade list of %s: no page overlapping what was read; stopping"
-                                " at %s trades", market or "the feed", f"{len(out):,}")
-                    return out, False
-                o = max(0, o - limit // 2)
-        fresh = [t for t in page if _key(t) not in seen]
-        seen.update(_key(t) for t in fresh)
-        out += fresh
-        if len(page) < asked:
+    The venue answers each request from one of several copies, each running
+    a few minutes behind by its own amount, so pages from different requests
+    do not line up. The list is read as one request from the newest trade,
+    asked again larger until it reaches far enough (settings.POLY_LIST_SIZES):
+    every answer is whole. Only past the largest is a second page read, at an
+    offset, and it must overlap the first or it is asked for again."""
+    out = []
+    for size in settings.POLY_LIST_SIZES:
+        out = venues.poly_trades(market, 0, size, stop)
+        if len(out) < size or (since is not None and out and int(out[-1]["timestamp"]) < since):
             return out, True
-        if since is not None and page and int(page[-1]["timestamp"]) < since:
+    seen = {_key(t) for t in out}
+    offset = min(venues.POLY_MAX_OFFSET, len(out) - OVERLAP)
+    size = min(settings.POLY_LIST_SIZES[-1], venues.POLY_MAX_PAGE)
+    for _ in range(DEEP_TRIES):
+        page = venues.poly_trades(market, offset, size, stop)
+        if not page:
             return out, True
+        if any(_key(t) in seen for t in page):
+            break
+        if stop is not None and stop.wait(2):
+            return out, False
+    else:
+        log.warning("trade list of %s: the page past %s trades never overlapped; stopping there",
+                    market or "the feed", f"{len(out):,}")
+        return out, False
+    out += [t for t in page if _key(t) not in seen]
+    if len(page) < size or (since is not None and int(page[-1]["timestamp"]) < since):
+        return out, True
     return out, False
 
 

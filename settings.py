@@ -94,11 +94,13 @@ POLY_FEED_LAG = _num("POLY_FEED_LAG_SECONDS", 30)
 # minutes). A market that has not traded lately says nothing about the age of
 # the copy that answered.
 POLY_LIST_LAG = _num("POLY_LIST_LAG_SECONDS", 900)
-# How the trade lists are read: (offset, limit) steps, newest first. The venue
-# refuses an offset past 10,000 or a page over 10,000, so these reach the
-# newest 20,000 trades; tests shrink them to make gaps quickly.
-POLY_PAGES = [tuple(int(x) for x in step.split(":")) for step in _list("POLY_PAGES")] or [
-    (0, 1000), (1000, 1000), (2000, 1000), (3000, 7000), (10_000, 10_000)]
+# How the trade lists are read: one request from the newest trade, of each of
+# these sizes in turn until it reaches back far enough -- one request is one
+# copy of the venue, so it never has a hole -- then, past the largest, one more
+# page at an offset (the venue refuses offsets past POLY_MAX_OFFSET). That
+# reaches the newest ~20,000 trades; tests shrink both to make gaps quickly.
+POLY_LIST_SIZES = [int(x) for x in _list("POLY_LIST_SIZES")] or [1000, 4000, 10_000]
+POLY_MAX_OFFSET = _num("POLY_MAX_OFFSET", 10_000)
 # Where Polymarket is (the tests point these at a simulated one).
 POLY_GAMMA_URL = os.environ.get("POLY_GAMMA_URL", "").strip() or "https://gamma-api.polymarket.com"
 POLY_CLOB_URL = os.environ.get("POLY_CLOB_URL", "").strip() or "https://clob.polymarket.com"

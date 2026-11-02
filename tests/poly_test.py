@@ -7,7 +7,7 @@
 Runs in its own schema (pm_polytest), its own Redis (port 6392) and against
 tests/mock_poly.py, so neither the real data nor the real Polymarket is
 touched. The simulated venue trades about 900 times a minute -- as fast as the
-real one -- and its trade lists are cut to 2,000 trades (POLY_PAGES) so a gap
+real one -- and its trade lists are cut to 2,000 trades (POLY_LIST_SIZES) so a gap
 is only two minutes away. Its trades are known in advance, so every stored
 trade and every candle is checked against them.
 
@@ -52,7 +52,7 @@ ENV = dict(os.environ, PGSCHEMA=SCHEMA, REDIS_URL=f"redis://127.0.0.1:{REDIS_POR
            REDIS_PREFIX="pmpoly:", PM_STATE_DIR=str(WORK / "state"), LIVE_VENUES="poly",
            KALSHI_API_URL="http://127.0.0.1:9/trade-api/v2",
            POLY_GAMMA_URL=MOCK, POLY_CLOB_URL=MOCK, POLY_DATA_URL=MOCK,
-           POLY_PAGES="0:500,500:500,1000:1000", POLY_LIST_LAG_SECONDS="60",
+           POLY_LIST_SIZES="500,1000", POLY_MAX_OFFSET="1000", POLY_LIST_LAG_SECONDS="60",
            POLY_FEED_LAG_SECONDS="25", POLY_FEED_SECONDS="5",
            POLY_REQUESTS_PER_MIN="600", POLY_MAX_PER_SECOND="15",
            BACKFILL_DAYS="1", MARKET_SYNC_MINUTES="3", NET_PROBE_SECONDS="5",

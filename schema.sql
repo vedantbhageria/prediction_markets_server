@@ -331,6 +331,63 @@ CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
 
 
 -- ---------------------------------------------------------------------------
+-- Matching markets within and across venues (match.py). Every market as one
+-- record (propositions.py explains each field); `sources` says, field by
+-- field, whether the venue sent it ("native") or it was read from the wording
+-- ("regex"). The vectors live in vector.sql, applied only where pgvector is.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS propositions (
+    venue        TEXT NOT NULL,
+    market_id    TEXT NOT NULL,
+    group_id     TEXT,
+    kind         TEXT,
+    subject      TEXT,
+    entity       TEXT,
+    comparator   TEXT,
+    low          DOUBLE PRECISION,
+    high         DOUBLE PRECISION,
+    unit         TEXT,
+    when_at      TEXT,          -- a date, a month (2026-07), a quarter (2026-Q3) or a year
+    when_kind    TEXT,          -- by, on, within, after
+    placeholder  BOOLEAN NOT NULL DEFAULT false,
+    template     TEXT,
+    topic        TEXT[],
+    sources      JSONB,
+    made_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (venue, market_id)
+);
+
+CREATE INDEX IF NOT EXISTS propositions_template_idx ON propositions (template);
+CREATE INDEX IF NOT EXISTS propositions_group_idx ON propositions (venue, group_id);
+
+-- One embedding per distinct template (a whole ladder of strikes shares one).
+-- Searched in memory by match.py; pgvector would only add instant lookups.
+CREATE TABLE IF NOT EXISTS template_vectors (
+    template  TEXT PRIMARY KEY,
+    model     TEXT NOT NULL,
+    vec       REAL[] NOT NULL
+);
+
+-- How two markets relate (relate.py): a is never after b in (venue,
+-- market_id) order, so each pair is stored once. score is the embedding
+-- similarity of their templates that proposed the pair.
+CREATE TABLE IF NOT EXISTS matches (
+    a_venue   TEXT NOT NULL,
+    a_market  TEXT NOT NULL,
+    b_venue   TEXT NOT NULL,
+    b_market  TEXT NOT NULL,
+    label     TEXT NOT NULL,
+    reason    TEXT,
+    score     REAL,
+    made_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (a_venue, a_market, b_venue, b_market)
+);
+CREATE INDEX IF NOT EXISTS matches_b_idx ON matches (b_venue, b_market);
+CREATE INDEX IF NOT EXISTS matches_label_idx ON matches (label);
+
+
+-- ---------------------------------------------------------------------------
 -- The HTTP API (api/). Keys are stored only as a SHA-256 of the key itself:
 -- they are long random strings, so a plain hash is enough to make a stolen
 -- table useless. `scope` is 'read' (data only) or 'full' (may also ask for
