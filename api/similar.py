@@ -239,6 +239,10 @@ def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
             "text": round(text, 4), "days": days, "level": None if level is None else round(level, 4),
             "opposite": opp, "name": None if name is None else round(name, 4),
             "distance": round(distance(text, days, _level_cost(me, level), opp, name, weights), 4),
-            "relation": R.relate(me, c)[0]})
+            "relation": c})
     rows.sort(key=lambda r: (r["distance"], r["ticker"]))
-    return rows[:limit], me
+    rows = rows[:limit]
+    # The label is a reading aid and the slowest part: only for rows returned.
+    for r in rows:
+        r["relation"] = R.relate(me, r["relation"])[0]
+    return rows, me
