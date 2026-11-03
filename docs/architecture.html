@@ -413,11 +413,11 @@
     <tr><td>Mask</td><td>Numbers, dates, comparators and the named outcome become slots: "Bitcoin above ⟨x⟩ on ⟨date⟩". A whole price ladder shares one template.</td></tr>
     <tr><td>Embed</td><td>Each distinct template once, with bge-small-en-v1.5 (384 numbers) on the CPU; new templates every 10 minutes, open markets first.</td></tr>
     <tr><td>Search</td><td>The template's nearest neighbours by cosine distance from the HNSW index of each slice asked for (venue × open/closed), then every market behind them.</td></tr>
-    <tr><td>Measure</td><td>text (cosine), days between the dates the questions turn on, level (relative gap between thresholds), opposite (above vs below).</td></tr>
+    <tr><td>Measure</td><td>text (cosine), days between the dates the questions turn on, level (relative gap between thresholds), opposite (above vs below), name (how far apart the two named outcomes are: trigrams of the names, 0 where one abbreviates the other).</td></tr>
     <tr><td>Label</td><td>relate.py reads the pair: identical, complement, nested, overlapping, same_outcome or related. A reading aid; it filters nothing.</td></tr>
   </table></div>
   <div class="formula">
-    distance = text + 0.10 × min(days, 730) / 365 + 0.50 × min(level, 1) + 0.05 × opposite<br>
+    distance = text + 0.10 × min(days, 730) / 365 + 0.50 × min(level, 1) + 0.05 × opposite + 0.40 × name<br>
     <span class="c">limits: max_cosine (default 0.3), max_days, max_level · gates: subject, keywords</span>
   </div>
   <div class="grid" style="margin-top:14px">
@@ -668,7 +668,7 @@ pm.wait(pm.backfill("KXBTCD-…"))</pre>
     <tr><td>gates</td><td><code>subject</code> (same subject or named outcome), <code>keywords</code> (critical words, names, times of day agree).</td></tr>
     <tr><td>limit</td><td>Up to 1,000 rows (default 50).</td></tr>
   </table></div>
-  <p class="sub" style="margin:12px 0 0">Columns: <code>ticker venue title status same_event kind subject entity comparator low high unit when when_kind text days level opposite distance relation</code>; the market asked about comes back beside them, as its record.</p>
+  <p class="sub" style="margin:12px 0 0">Columns: <code>ticker venue title status same_event kind subject entity comparator low high unit when when_kind text days level opposite name distance relation</code>; the market asked about comes back beside them, as its record.</p>
 </section>
 
 <section>
@@ -758,6 +758,7 @@ GET /v1/backfill/17
     <tr><td>3 Nov</td><td>Polymarket events get Kalshi&#x27;s category names from their tags</td><td>The mapping lived only in the retired loader, so since the rebuild every Polymarket event had no category and fell out of every category filter. 187,178 of 187,200 events now have one; the first matching category in a fixed order wins (an event tagged trump and elections is Elections).</td></tr>
     <tr><td>3 Nov</td><td>Gamma market look-ups move to /markets/keyset</td><td>The first daily check caught Polymarket marking /markets deprecated (sunset 1 May 2026, &#x27;use /markets/keyset&#x27;). It still answers; v1 of the trades API also still answered until the day it did not.</td></tr>
     <tr><td>3 Nov</td><td>Related wording reads nearest first on both venues</td><td>A GiST trigram index on the 1.6M Polymarket questions (322 MB) lets the panel walk to the nearest wording instead of scoring every candidate: 5-14 s down to 1.4-2 s.</td></tr>
+    <tr><td>3 Nov</td><td>The named outcome counts in the similar-markets distance (+ 0.40 x name)</td><td>The template masks the name, so in a &#x27;who will win&#x27; event every candidate looked equally near. Measured on fresh samples: the right one ranked first in 0 of 25 before and 24 after, then 2 of 36 before and 36 after; no market got worse; markets without a name unchanged (20 of 20); search time unchanged (median 277 ms). Name-only trigrams beat whole-title trigrams (24 vs 20 first), whose shared boilerplate scores every candidate alike.</td></tr>
     <tr><td>3 Nov</td><td>Vectors for cross-venue matches; wording for siblings</td><td>On 20 real markets, vectors found the same bet worded differently where wording found junk (Bitcoin $200k, the House, SAVE Act), in milliseconds. Wording won on &#x27;who will win&#x27; markets: the named outcome is masked out of the vector and not yet put back into the ranking.</td></tr>
     <tr><td>3 Nov</td><td>WARP dropped; Polymarket goes direct</td><td>Overnight tests showed Polymarket answers directly whenever the network lets anything through. During blocks WARP&#x27;s tunnel broke too, taking every open connection with it, and switching routes (106 times in a day) only opened more new connections, which blocks refuse. Direct connections stay open through blocks, as Kalshi&#x27;s do.</td></tr>
     <tr><td>3 Nov</td><td>One feed read goes back at most 100,000 trades</td><td>Memory: after a long gap the feed starts again from now and the gap is caught up market by market.</td></tr>
