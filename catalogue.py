@@ -45,14 +45,75 @@ MARKET_COLS = ["ticker", "event_ticker", "title", "status", "result", "open_time
 MARKET_WATCH = ["status", "result", "volume", "open_interest", "close_time", "title"]
 TITLE = MARKET_COLS.index("title")
 
-POLY_EVENT_COLS = ["event_id", "slug", "title", "tags"]
-POLY_EVENT_WATCH = ["slug", "title", "tags"]
+POLY_EVENT_COLS = ["event_id", "slug", "title", "category", "tags"]
+POLY_EVENT_WATCH = ["slug", "title", "category", "tags"]
 POLY_COLS = ["condition_id", "event_id", "slug", "question", "yes_token_id",
              "end_date", "closed", "volume", "liquidity", "raw"]
 POLY_WATCH = ["closed", "volume", "liquidity", "end_date", "question"]
 
 # Most stored markets re-read per pass after leaving a venue's open list.
 STALE_MAX = 5000
+
+# Polymarket has no category, only 8-9 tags per event; these put an event in
+# Kalshi's category of the same name, so one vocabulary covers both venues.
+# The first category with a matching tag wins: an event tagged "trump" and
+# "elections" is Elections. Built from the tags actually used (3 Nov 2026).
+POLY_CATEGORIES = [
+    ("Elections", {"elections", "midterms", "house-elections", "senate-elections",
+                   "global-elections", "world-elections", "us-presidential-election",
+                   "main-election", "nov-4-elections", "international-election-props",
+                   "midtermmov", "primaries", "governor-elections"}),
+    ("Politics", {"politics", "us-politics", "trump", "congress", "supreme-court",
+                  "trump-cabinet", "white-house"}),
+    ("World", {"geopolitics", "world", "ukraine", "russia", "israel", "middle-east", "china",
+               "nato", "iran", "gaza", "venezuela"}),
+    ("Crypto", {"crypto", "crypto-prices", "bitcoin", "ethereum", "solana", "xrp", "ripple",
+                "bnb", "dogecoin", "hype", "zcash", "airdrops", "stablecoins", "memecoins"}),
+    ("Sports", {"sports", "games", "soccer", "football", "basketball", "baseball", "hockey",
+                "tennis", "table-tennis", "cricket", "international-cricket", "esports",
+                "darts", "golf", "f1", "ufc", "boxing", "mma", "nfl", "nba", "mlb", "nhl",
+                "mls", "ncaa", "cfb", "ncaa-basketball", "cwbb", "epl", "EPL", "premier-league",
+                "la-liga", "bundesliga", "serie-a", "ligue-1", "ucl", "uel", "fa-cup",
+                "pickleball", "wtt", "counter-strike-2", "dota-2", "league-of-legends",
+                "valorant", "olympics", "chess"}),
+    ("Economics", {"economics", "economy", "inflation", "fed", "fed-rates", "fomc", "gdp",
+                   "jobs-report", "cpi", "recession", "tariffs"}),
+    ("Financials", {"finance", "equities", "stocks", "finance-updown", "pyth-finance",
+                    "daily-close", "forex", "pre-market", "indices", "treasuries"}),
+    ("Commodities", {"commodities", "gold", "silver", "oil", "natural-gas", "copper"}),
+    ("Companies", {"business", "big-tech", "earnings", "ipos", "ipo", "companies",
+                   "acquisitions", "tesla", "apple", "nvidia"}),
+    ("Science and Technology", {"tech", "ai", "science", "space", "spacex", "openai"}),
+    ("Climate and Weather", {"weather", "climate", "daily-temperature", "highest-temperature",
+                             "lowest-temperature", "hurricanes", "earthquakes", "global-temp"}),
+    ("Entertainment", {"pop-culture", "culture", "movies", "entertainment", "music", "tv",
+                       "awards", "oscars", "grammys", "box-office", "celebrities", "youtube",
+                       "twitter", "mentions"}),
+    ("Health", {"health", "pandemics", "measles", "covid"}),
+]
+
+
+def poly_category(tags):
+    """Kalshi's category name for a Polymarket event's tags, or None."""
+    have = set(tags or [])
+    for category, names in POLY_CATEGORIES:
+        if have & names:
+            return category
+    return None
+
+
+def recategorise_poly():
+    """Give every stored Polymarket event the category its tags map to (they
+    were stored without one until 3 Nov 2026). Returns how many changed."""
+    rows = [(r["event_id"], poly_category(r["tags"]))
+            for r in db.query("SELECT event_id, tags, category FROM poly_events")
+            if poly_category(r["tags"]) != r["category"]]
+    for i in range(0, len(rows), 5000):
+        with db.cursor(dict_rows=False) as cur:
+            execute_values(cur, """UPDATE poly_events e SET category = v.c
+                                   FROM (VALUES %s) AS v(id, c) WHERE e.event_id = v.id""",
+                           rows[i:i + 5000], page_size=5000)
+    return len(rows)
 
 
 
@@ -326,7 +387,8 @@ def _poly_rows(page):
         if not nested:
             continue
         tags = [t.get("slug") for t in event.get("tags") or [] if t.get("slug")]
-        events.append((str(event["id"]), event.get("slug"), event.get("title"), tags))
+        events.append((str(event["id"]), event.get("slug"), event.get("title"),
+                       poly_category(tags), tags))
         markets += [_poly_row(m, str(event["id"])) for m in nested]
     return events, markets
 
