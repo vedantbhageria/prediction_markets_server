@@ -1642,6 +1642,7 @@ STATUS_PAGE = """
          border-radius: 4px; margin-right: 6px; vertical-align: 2px; }
  .vtag.k { background: #2a6099; } .vtag.p { background: #99542a; } .vtag.s { background: #666; }
  h4.vhead { margin: 14px 0 6px; font-size: 14px; }
+ .tiles.k, .tiles.p { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
  .tiles.k .tile { background: rgba(42, 96, 153, 0.09); }
  .tiles.p .tile { background: rgba(153, 84, 42, 0.10); }
  .col { border: 1px solid var(--line); border-radius: 6px; padding: 12px 16px; margin-top: 12px; min-width: 0; }
@@ -1697,8 +1698,9 @@ STATUS_PAGE = """
 
 <h4 class="vhead"><span class="vtag k">Kalshi</span>live candles from Kalshi's candle endpoint</h4>
 <div class="tiles k">
-  <div class="tile {{ 'bad' if c.down else 'good' }}"><b>{{ 'down' if c.down else 'up' }}</b>
-    <span>Kalshi API{% if c.down %} &middot; since {{ c.down }}{% endif %}</span></div>
+  {% set k_partly = c.down and c.live and c.live.behind < 900 %}
+  <div class="tile {{ 'warn' if k_partly else 'bad' if c.down else 'good' }}"><b>{{ 'partly down' if k_partly else 'down' if c.down else 'up' }}</b>
+    <span>Kalshi API{% if k_partly %} &middot; new connections failing since {{ c.down }}; open ones still read{% elif c.down %} &middot; since {{ c.down }}{% endif %}</span></div>
   <div class="tile {{ 'good' if c.live and c.live.behind < 240 else 'warn' if c.live and c.live.behind < 900 else 'bad' }}">
     <b>{{ (c.live.behind|string + ' s') if c.live else '—' }}</b><span>live candles behind the clock</span></div>
   <div class="tile"><b>{{ '{:,}'.format(c.live.candles) if c.live else '—' }}</b>
@@ -1712,8 +1714,9 @@ STATUS_PAGE = """
 </div>
 <h4 class="vhead"><span class="vtag p">Polymarket</span>every trade from the data API; candles made from them</h4>
 <div class="tiles p">
-  <div class="tile {{ 'bad' if p.down else 'good' }}"><b>{{ 'down' if p.down else 'up' }}</b>
-    <span>Polymarket API &middot; {{ 'through the VPN' if p.route == 'vpn' else 'direct' }}</span></div>
+  {% set p_partly = p.down and p.recent and p.behind is not none and p.behind < 600 %}
+  <div class="tile {{ 'warn' if p_partly else 'bad' if p.down else 'good' }}"><b>{{ 'partly down' if p_partly else 'down' if p.down else 'up' }}</b>
+    <span>Polymarket API &middot; {{ 'through the VPN' if p.route == 'vpn' else 'direct' }}{% if p_partly %} &middot; new connections failing since {{ p.down }}; the open feed still reads{% elif p.down %} &middot; since {{ p.down }}{% endif %}</span></div>
   <div class="tile {{ 'good' if p.behind is not none and p.behind < 600 else 'warn' if p.behind is not none and p.behind < 1800 else 'bad' if p.behind is not none else '' }}">
     <b>{{ (p.behind|string + ' s') if p.behind is not none else '—' }}</b><span>trade feed behind the clock &middot; claimed 30 s behind its newest trade</span></div>
   <div class="tile"><b>{{ '{:,}'.format(p.recent) if p.recent is not none else '—' }}</b><span>trades stored in the last 5 min</span></div>
@@ -2096,7 +2099,8 @@ def _poly():
            "waiting": None, "used": "—", "limit": settings.POLY_REQUESTS_PER_MIN, "tracked": 0}
     try:
         r = ratelimit.client()
-        out["down"] = r.get(f"{settings.REDIS_PREFIX}down:data-api.polymarket.com")
+        down = r.get(f"{settings.REDIS_PREFIX}down:data-api.polymarket.com")
+        out["down"] = _when(datetime.fromtimestamp(float(down), timezone.utc)) if down else None
         out["route"] = ((r.get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com") or "vpn")
                         if settings.VPN_PROXY else "direct")
         out["used"] = sum(ratelimit.used(s, 1, "poly") or 0 for s in ratelimit.SHARE)
