@@ -1,9 +1,8 @@
 """Every file location in one place.
 
     data/
-      perp_markets.jsonl   Kalshi's perpetual instruments (kalshi_perps.py)
-      perps.parquet        their candles
-      state/               discovery's resume state, monitor.py's minute files
+      state/               discovery's resume state, monitor.py's minute files,
+                           the daily check's place in the logs
 
 Everything else lives in PostgreSQL.
 """
@@ -14,9 +13,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 STATE = Path(os.environ.get("PM_STATE_DIR") or DATA / "state")   # tests use their own
-
-PERP_MARKETS = DATA / "perp_markets.jsonl"
-PERP_CANDLES = DATA / "perps.parquet"
 
 SCHEMA = ROOT / "schema.sql"
 

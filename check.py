@@ -1,8 +1,9 @@
-"""The daily data check: is what we store right, complete and current?
+"""The daily data check, and a watchdog between checks.
 
-    python check.py            # run forever: once a day at CHECK_HOUR UTC (the check service)
-    python check.py --now      # one run now, then exit
-    python check.py --show     # print the newest run
+    python check.py            # run forever (the check service): the watchdog
+                               # every 5 minutes, the full check once a day
+    python check.py --now      # one full check now, then exit
+    python check.py --show     # print the newest check
 
 Once a day, at the quietest hour on both venues (09:00 UTC by default), every
 check below runs over the day before (UTC) and each gives ok, warn or fail:
@@ -31,6 +32,19 @@ Results go into the `checks` table (one row per check per run), show on the
 viewer's /status page and at GET /v1/checks, and are pushed to a phone through
 ntfy (https://ntfy.sh): set NTFY_TOPIC in .env and subscribe to the same topic
 in the ntfy app. The push is retried while the network is blocked.
+
+The watchdog, every WATCH_SECONDS, looks only at what needs action now and
+pushes the moment it starts (again every 6 hours while it lasts) and when it
+clears:
+
+    programs     a program is not running
+    kalshi_live  Kalshi live more than 15 minutes behind
+    poly_feed    the Polymarket feed more than 30 minutes behind
+    aggregate    a minute waiting more than an hour for its candle
+    disk         less than 10% free
+    venue_api    a venue answered 410 (an endpoint retired), sent a
+                 deprecation notice, or left out a field the code needs
+                 (pushed once, as it happens)
 """
 
 import argparse
@@ -59,11 +73,15 @@ import venues
 
 log = logging.getLogger("check")
 
+db.load_env()
 CHECK_HOUR = int(os.environ.get("CHECK_HOUR_UTC", "9"))
 NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 PUSH_TRIES = 72                 # every 5 minutes for 6 hours
 STATE = paths.state("check.json")
+WATCH_STATE = paths.state("watch.json")
+WATCH_SECONDS = 300
+REMIND_SECONDS = 6 * 3600
 LOGS = os.path.expanduser("~/logs")
 PROGRAMS = {"discover": "discover.py", "activity": "activity.py", "live": "live.py",
             "trades": "trades.py", "aggregate": "aggregate.py", "backfill": "backfill.py",
@@ -71,6 +89,7 @@ PROGRAMS = {"discover": "discover.py", "activity": "activity.py", "live": "live.
 SAMPLE = 12                     # markets re-read per venue
 OK, WARN, FAIL = "ok", "warn", "fail"
 ORDER = {FAIL: 0, WARN: 1, OK: 2}
+
 
 def yesterday():
     """[start, end) of yesterday, UTC, as unix seconds."""
@@ -86,8 +105,9 @@ def _level(value, warn, fail):
 # The checks. Each returns (status, value, detail).
 # ---------------------------------------------------------------------------
 
-def check_freshness(ctx):
-    out, worst = {}, OK
+def freshness():
+    """How far behind Kalshi live, the Polymarket feed and the aggregator are."""
+    out = {}
     live = ratelimit.client().get(ratelimit.KEY + "live")
     behind = time.time() - json.loads(live)["minute"] if live else None
     if behind is None:
@@ -100,6 +120,11 @@ def check_freshness(ctx):
     dirty = db.query("SELECT count(*) AS n, EXTRACT(EPOCH FROM now() - min(minute)) AS s"
                      " FROM poly_dirty")[0]
     out["candles_waiting"], out["oldest_waiting_s"] = dirty["n"], round(float(dirty["s"] or 0))
+    return out
+
+
+def check_freshness(ctx):
+    out, worst = freshness(), OK
     for value, warn, fail in ((out["kalshi_live_s"], 300, 1800),
                               (out["poly_feed_s"] if out["poly_feed_s"] is not None else 1e9, 600, 3600),
                               (out["oldest_waiting_s"], 1800, 7200)):
@@ -109,9 +134,13 @@ def check_freshness(ctx):
                    f" {out['poly_feed_s']} s, oldest candle waiting {out['oldest_waiting_s']} s"), out
 
 
+def not_running():
+    return [name for name, pattern in PROGRAMS.items()
+            if subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode != 0]
+
+
 def check_programs(ctx):
-    missing = [name for name, pattern in PROGRAMS.items()
-               if subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode != 0]
+    missing = not_running()
     return (FAIL if missing else OK,
             f"not running: {', '.join(missing)}" if missing else f"all {len(PROGRAMS)} running",
             {"missing": missing})
@@ -264,7 +293,7 @@ def check_sanity(ctx):
 
 def _new_log_lines(ctx):
     """Log lines written since the last run (the last 2 MB of each log the
-    first time)."""
+    first time). The check and the watchdog each keep their own place."""
     if "lines" in ctx:
         return ctx["lines"]
     seen = ctx["state"].setdefault("log_offsets", {})
@@ -285,7 +314,9 @@ def _new_log_lines(ctx):
     return lines
 
 
-def check_venue_api(ctx):
+def venue_answers(ctx):
+    """(HTTP 4xx counts by venue, deprecation lines, trades missing fields)
+    in the log lines since the last look."""
     counts, deprecated, dropped = {}, [], 0
     for name, lines in _new_log_lines(ctx).items():
         for line in lines:
@@ -298,6 +329,11 @@ def check_venue_api(ctx):
             m = re.search(r"trades without the fields needed: (\d+)", line)
             if m:
                 dropped += int(m.group(1))
+    return counts, deprecated, dropped
+
+
+def check_venue_api(ctx):
+    counts, deprecated, dropped = venue_answers(ctx)
     gone = sum(v for k, v in counts.items() if k.endswith("410"))
     status = (FAIL if gone or dropped else
               WARN if deprecated or sum(counts.values()) > 100 else OK)
@@ -469,6 +505,86 @@ def push(results, stop=None):
     return False
 
 
+def _load(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def watch_problems(ctx):
+    """({condition: problem or None}, [one-off events]) right now."""
+    f = freshness()
+    missing = not_running()
+    total, _, free = shutil.disk_usage("/")
+    problems = {
+        "programs": f"not running: {', '.join(missing)}" if missing else None,
+        "kalshi_live": (f"Kalshi live is {f['kalshi_live_s'] // 60} min behind"
+                        if f["kalshi_live_s"] > 900 else None),
+        "poly_feed": (f"the Polymarket feed is {f['poly_feed_s'] // 60} min behind"
+                      if f["poly_feed_s"] is not None and f["poly_feed_s"] > 1800 else None),
+        "aggregate": (f"{f['candles_waiting']:,} minutes waiting for their candle, the oldest"
+                      f" {f['oldest_waiting_s'] // 60} min" if f["oldest_waiting_s"] > 3600 else None),
+        "disk": f"only {100 * free / total:.0f}% of the disk free" if free / total < 0.10 else None,
+    }
+    counts, deprecated, dropped = venue_answers(ctx)
+    events = []
+    gone = {k: v for k, v in counts.items() if k.endswith("410")}
+    if gone:
+        events.append("an endpoint is retired (HTTP 410): " + ", ".join(f"{k} x{v}" for k, v in gone.items()))
+    if deprecated:
+        events.append("deprecation notice: " + deprecated[0])
+    if dropped:
+        events.append(f"{dropped:,} Polymarket trades arrived without a field the code needs")
+    return problems, events
+
+
+def _push_once(title, body, priority):
+    if not NTFY_TOPIC:
+        return True                     # nowhere to push: nothing to keep
+    try:
+        r = requests.post(f"{NTFY_URL}/{NTFY_TOPIC}", data=body.encode("utf-8"), timeout=30,
+                          headers={"Title": title, "Priority": str(priority),
+                                   "Tags": {5: "rotating_light", 4: "warning"}.get(priority, "white_check_mark")})
+        return r.status_code < 300
+    except requests.RequestException:
+        return False
+
+
+def watch(stop):
+    """The watchdog loop (a thread of the service). Pushes that fail -- the
+    network blocked -- are kept and sent on a later round."""
+    state = _load(WATCH_STATE)
+    pending = []
+    while not stop.wait(WATCH_SECONDS):
+        try:
+            now = time.time()
+            ctx = {"state": state}
+            problems, events = watch_problems(ctx)
+            active = state.setdefault("active", {})
+            for name, problem in problems.items():
+                if problem and name not in active:
+                    active[name] = {"since": now, "pushed": now}
+                    pending.append((f"prediction_markets: {name}", problem, 5))
+                elif problem and now - active[name]["pushed"] > REMIND_SECONDS:
+                    active[name]["pushed"] = now
+                    hours = (now - active[name]["since"]) / 3600
+                    pending.append((f"prediction_markets: still {name}",
+                                    f"{problem} (for {hours:.0f} h)", 4))
+                elif not problem and name in active:
+                    took = (now - active.pop(name)["since"]) / 60
+                    pending.append((f"prediction_markets: {name} fine again",
+                                    f"recovered after {took:.0f} min", 3))
+            pending += [("prediction_markets: venue_api", e, 5) for e in events]
+            for name, problem in problems.items():
+                if problem:
+                    log.warning("watch: %s: %s", name, problem)
+            WATCH_STATE.write_text(json.dumps(state))
+            pending = [p for p in pending if not _push_once(*p)][-50:]
+        except Exception as exc:
+            log.warning("watch round failed: %s: %s", type(exc).__name__, exc)
+
+
 def latest():
     return db.query("SELECT * FROM checks WHERE run_at = (SELECT max(run_at) FROM checks)"
                     " ORDER BY CASE status WHEN 'fail' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, name")
@@ -502,6 +618,7 @@ def main():
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
+    threading.Thread(target=watch, args=(stop,), name="watch", daemon=True).start()
     while not stop.is_set():
         at = next_run()
         log.info("next check at %s UTC", time.strftime("%Y-%m-%d %H:%M", time.gmtime(at)))

@@ -48,6 +48,7 @@ for name in $PROGRAMS; do
     cp "$APP/deploy/prediction-markets-$name.service" /etc/systemd/system/
 done
 systemctl daemon-reload
+install -m 644 "$APP/deploy/logrotate.conf" /etc/logrotate.d/prediction-markets
 for name in $PROGRAMS; do
     systemctl enable --now "prediction-markets-$name" > /dev/null 2>&1
 done

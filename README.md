@@ -210,11 +210,6 @@ than `MARKET_RETENTION_DAYS` ago, candles included**. Do not point them at a
 database holding history you want to keep without `--no-prune` or
 `MARKET_RETENTION_DAYS=0`.
 
-## The original batch scrapers
-
-`kalshi_markets.py`, `kalshi_candles.py`, `kalshi_perps.py`, `polymarket.py` and
-`load_db.py` are the run-by-hand pipeline this replaced; they still work.
-
 ## Two things worth knowing
 
 **Kalshi's catalogue is mostly combination markets.** `KXMVE*` tickers are

@@ -114,6 +114,13 @@ def run(name, args, timeout=3600):
     return code, round(time.time() - a, 1)
 
 
+def _redis_up():
+    try:
+        return redis.Redis(port=REDIS_PORT).ping()
+    except redis.RedisError:
+        return False
+
+
 def wait_http(url, seconds=120):
     for _ in range(seconds * 2):
         try:
@@ -513,6 +520,10 @@ def main():
         # imported up to" from an earlier run would skip them.
         shutil.rmtree(WORK / "state", ignore_errors=True)
         (WORK / "state").mkdir()
+        # The same goes for Redis: a test Redis left running by an earlier run
+        # still holds its budget, cut to a tenth by that run's throttle phase.
+        wait_until(lambda: _redis_up(), 30, 1)
+        redis.Redis(port=REDIS_PORT).flushdb()
         with db.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")

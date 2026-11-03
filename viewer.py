@@ -9,16 +9,13 @@ import argparse
 import json
 import math
 import re
-import sys
-
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from zoneinfo import ZoneInfo
-
 from urllib.parse import quote, urlencode
-
+from zoneinfo import ZoneInfo
 
 from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request)
@@ -81,7 +78,51 @@ NAV_LINKS = [("tables", "/table/kalshi_markets?dim=category"), ("visualise", "/v
              ("stats", "/stats"), ("status", "/status"), ("manage", "/manage"), ("docs", "/docs")]
 app.jinja_env.globals["NAV"] = (
     '<span class="links">'
-    + " ".join(f'<a href="{href}">{label}</a>' for label, href in NAV_LINKS) + "</span>")
+    + " ".join(f'<a href="{href}">{label}</a>' for label, href in NAV_LINKS)
+    + ' <a class="theme" onclick="return pmTheme()" title="light or dark">&#9680; theme</a></span>')
+# Light and dark colours for every page; dark follows the system unless the
+# theme link picked one (remembered in the browser).
+app.jinja_env.globals["THEME"] = """<meta name="color-scheme" content="light dark">
+<style>
+ :root { --bg:#fff; --ink:#222; --muted:#666; --faint:#999; --line:#ddd; --line2:#eee;
+         --soft:#f4f4f4; --soft2:#fafafa; --link:#0645ad; --accent:#2a6099;
+         --accent-soft:#f6f9ff; --accent-line:#ccd8ee; --ok:#262; --ok-soft:#e6f6e6;
+         --warn:#8a5a00; --warn-soft:#fff4d6; --bad:#a33; --bad-soft:#fff2f2;
+         --bad-line:#f0c0c0; --down:#f6d5d4; color-scheme: light; }
+ @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+         --bg:#15171b; --ink:#e4e6ea; --muted:#a3aab4; --faint:#7f8791; --line:#363b44;
+         --line2:#2a2e35; --soft:#1f2228; --soft2:#1a1d22; --link:#8cb4ff; --accent:#6fa0d8;
+         --accent-soft:#1a2433; --accent-line:#30476a; --ok:#80d38c; --ok-soft:#1b3121;
+         --warn:#e9c46e; --warn-soft:#382e14; --bad:#ff8f8f; --bad-soft:#3b1d1d;
+         --bad-line:#6d2f2f; --down:#4a2727; color-scheme: dark; } }
+ :root[data-theme="dark"] {
+         --bg:#15171b; --ink:#e4e6ea; --muted:#a3aab4; --faint:#7f8791; --line:#363b44;
+         --line2:#2a2e35; --soft:#1f2228; --soft2:#1a1d22; --link:#8cb4ff; --accent:#6fa0d8;
+         --accent-soft:#1a2433; --accent-line:#30476a; --ok:#80d38c; --ok-soft:#1b3121;
+         --warn:#e9c46e; --warn-soft:#382e14; --bad:#ff8f8f; --bad-soft:#3b1d1d;
+         --bad-line:#6d2f2f; --down:#4a2727; color-scheme: dark; }
+ html, body { background: var(--bg); color: var(--ink); }
+ a { color: var(--link); }
+ input, select, textarea { background: var(--soft2); color: var(--ink);
+                           border: 1px solid var(--line); border-radius: 4px; }
+ .links a.theme { cursor: pointer; }
+</style>
+<script>
+(function () {
+  try { var t = localStorage.getItem('pm-theme'); if (t) document.documentElement.setAttribute('data-theme', t); }
+  catch (e) {}
+})();
+function pmTheme() {
+  var root = document.documentElement, now = root.getAttribute('data-theme') ||
+      (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  var next = now === 'dark' ? 'light' : 'dark';
+  root.setAttribute('data-theme', next);
+  try { localStorage.setItem('pm-theme', next); } catch (e) {}
+  window.dispatchEvent(new Event('themechange'));
+  return false;
+}
+</script>
+"""
 
 
 @lru_cache(maxsize=None)
@@ -114,58 +155,56 @@ def dim_source(name, dim):
     if name in ("poly_markets", "poly_candles"):
         col = {"category": "e.category", "event_slug": "e.slug"}.get(dim, f"m.{dim}")
         return "poly_markets m LEFT JOIN poly_events e USING (event_id)", col, "m.condition_id"
-    if name == "kalshi_perp_candles":
-        return "kalshi_perp_markets m", f"m.{dim}", "m.ticker"
     return f'"{name}" m', f"m.{dim}", f"m.{key_col(name)}"
 
 # Nav order: general -> specific, one group per instrument type. Anything not
 # listed here is appended in its own group.
 TABLE_GROUPS = [
     ["kalshi_series", "kalshi_events", "kalshi_markets", "kalshi_candles"],
-    ["kalshi_perp_markets", "kalshi_perp_candles"],
-    ["poly_events", "poly_markets", "poly_candles"],
+    ["poly_events", "poly_markets", "poly_candles", "poly_trades"],
 ]
 
 PAGE = """
 <!doctype html>
+{{ THEME|safe }}
 <title>prediction_markets</title>
 <style>
  body { font-family: system-ui, sans-serif; margin: 1.5rem; }
  table { border-collapse: collapse; font-size: 13px; }
- th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
- th { background: #eee; position: sticky; top: 0; }
+ th, td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+ th { background: var(--line2); position: sticky; top: 0; }
  td { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
  nav a { margin-right: 4px; }
- nav small { margin-right: 12px; color: #666; }
+ nav small { margin-right: 12px; color: var(--muted); }
  nav a.on { font-weight: 700; }
- nav .sep { margin: 0 14px 0 2px; color: #bbb; }
+ nav .sep { margin: 0 14px 0 2px; color: var(--line); }
  textarea { width: 100%; height: 60px; font-family: monospace; }
- .err { color: #b00; }
+ .err { color: var(--bad); }
  .cols { display: flex; gap: 18px; align-items: flex-start; }
  .cols.no-filters .side { display: none; }
  .cols.no-nearby .nearby { display: none; }
  header .toggles { margin-left: auto; }
  header .toggles button { font-size: 12px; padding: 3px 9px; margin-left: 6px;
-   border: 1px solid #ccc; background: #f6f6f6; border-radius: 3px; cursor: pointer; }
+   border: 1px solid var(--line); background: var(--soft); border-radius: 3px; cursor: pointer; }
  header .toggles button.off { opacity: .45; }
  header .toggles button:disabled { opacity: .35; cursor: help; }
- .side { width: 250px; flex: none; border-right: 1px solid #ddd; padding-right: 12px;
+ .side { width: 250px; flex: none; border-right: 1px solid var(--line); padding-right: 12px;
          max-height: 78vh; overflow-y: auto; }
  .side b { display: block; font-size: 12px; text-transform: uppercase;
-           color: #555; margin-bottom: 4px; }
- .side small { color: #888; }
- .detail { background: #f6f6f6; border-left: 3px solid #0645ad; padding: 8px 12px;
+           color: var(--muted); margin-bottom: 4px; }
+ .side small { color: var(--faint); }
+ .detail { background: var(--soft); border-left: 3px solid var(--link); padding: 8px 12px;
            margin-bottom: 10px; }
  header { display: flex; align-items: baseline; gap: 18px; }
  header h2 { margin: 0 0 6px; }
  header .links a { font-size: 13px; margin-right: 12px; }
- .okc { color: #262; }
- .sentinel { padding: 10px 4px; font-size: 12px; color: #555; cursor: pointer;
-             text-align: center; border: 1px solid #ddd; border-radius: 4px;
-             margin-top: 8px; background: #fafafa; }
- .msg { background: #eef7ee; border-left: 3px solid #4a4; padding: 6px 10px;
+ .okc { color: var(--ok); }
+ .sentinel { padding: 10px 4px; font-size: 12px; color: var(--muted); cursor: pointer;
+             text-align: center; border: 1px solid var(--line); border-radius: 4px;
+             margin-top: 8px; background: var(--soft2); }
+ .msg { background: var(--ok-soft); border-left: 3px solid #4a4; padding: 6px 10px;
         margin-bottom: 8px; font-size: 13px; }
- .msg.err { background: #fdeeee; border-left-color: #c44; }
+ .msg.err { background: var(--bad-soft); border-left-color: var(--bad); }
  .spin { display: inline-block; width: 9px; height: 9px; margin-right: 5px;
          border: 2px solid #4a4; border-right-color: transparent;
          border-radius: 50%; animation: spin .7s linear infinite; }
@@ -176,59 +215,59 @@ PAGE = """
  .search a { font-size: 12px; margin-left: 8px; }
  .fetch { margin-bottom: 10px; }
  .raw { margin-top: 14px; }
- .raw summary { cursor: pointer; font-size: 12px; color: #555; }
+ .raw summary { cursor: pointer; font-size: 12px; color: var(--muted); }
  .raw table { margin-top: 6px; font-size: 12px; }
  .raw th { text-align: left; white-space: nowrap; vertical-align: top; }
  .raw td { max-width: 620px; white-space: normal; }
- .btn { display: inline-block; background: #0645ad; color: #fff; padding: 5px 11px;
+ .btn { display: inline-block; background: var(--link); color: #fff; padding: 5px 11px;
         border-radius: 3px; font-size: 12px; text-decoration: none; }
- .btn:hover { background: #053a80; }
- .idx { color: #999; font-size: 11px; text-align: right; width: 1%;
+ .btn:hover { background: var(--link); }
+ .idx { color: var(--faint); font-size: 11px; text-align: right; width: 1%;
         white-space: nowrap; }
  th.idx { text-align: right; }
  .main td a { text-decoration: none; }
  .side a { display: block; padding: 2px 4px; font-size: 12px; text-decoration: none;
            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
- .side a.on { background: #0645ad; color: #fff; border-radius: 3px; }
+ .side a.on { background: var(--link); color: #fff; border-radius: 3px; }
  .side input { width: 100%; margin-bottom: 6px; }
- .dims { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+ .dims { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line2); }
  .dims a { display: inline-block; font-size: 11px; margin: 0 6px 2px 0;
-           padding: 1px 5px; border-radius: 3px; background: #f0f0f0;
-           color: #333; }
- .dims a.on { background: #0645ad; color: #fff; }
+           padding: 1px 5px; border-radius: 3px; background: var(--soft);
+           color: var(--ink); }
+ .dims a.on { background: var(--link); color: #fff; }
  .main { flex: 1; overflow-x: auto; min-width: 0; }
- .related { width: 290px; flex: none; border-left: 1px solid #ddd; padding-left: 12px;
+ .related { width: 290px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
             max-height: 78vh; overflow-y: auto; }
- .related b { display: block; font-size: 12px; text-transform: uppercase; color: #555; }
+ .related b { display: block; font-size: 12px; text-transform: uppercase; color: var(--muted); }
  .related a { display: block; font-size: 12px; text-decoration: none; margin-top: 6px; }
- .related .meta { font-size: 11px; color: #777; }
+ .related .meta { font-size: 11px; color: var(--muted); }
  .sliderow { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; }
  .sliderow input { flex: 1; }
- .sliderow span { font-size: 11px; color: #555; width: 34px; text-align: right; }
+ .sliderow span { font-size: 11px; color: var(--muted); width: 34px; text-align: right; }
  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
  .dot.on { background: #4a4; }
  .cols.no-related .related { display: none; }
- .nearby { width: 300px; flex: none; border-left: 1px solid #ddd; padding-left: 12px;
+ .nearby { width: 300px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
            max-height: 78vh; overflow-y: auto; }
  .nearby b { display: block; font-size: 12px; text-transform: uppercase;
-             color: #555; }
- .nearby .anchor { font-size: 11px; color: #888; margin-bottom: 8px; }
+             color: var(--muted); }
+ .nearby .anchor { font-size: 11px; color: var(--faint); margin-bottom: 8px; }
  .nearby a { display: block; font-size: 12px; text-decoration: none;
              margin-top: 6px; }
- .nearby .meta { font-size: 11px; color: #777; }
+ .nearby .meta { font-size: 11px; color: var(--muted); }
  .byrow { margin: 6px 0 10px; }
  a.nctl { cursor: pointer; }
  .byrow a { display: inline-block; font-size: 11px; margin: 0 4px 3px 0;
-            padding: 2px 6px; border-radius: 3px; background: #f0f0f0; color: #333;
+            padding: 2px 6px; border-radius: 3px; background: var(--soft); color: var(--ink);
             text-decoration: none; }
- .byrow a.on { background: #0645ad; color: #fff; }
- .widen { margin-top: 12px; border-top: 1px solid #eee; padding-top: 6px; }
+ .byrow a.on { background: var(--link); color: #fff; }
+ .widen { margin-top: 12px; border-top: 1px solid var(--line2); padding-top: 6px; }
  .widen a { display: inline-block; margin-right: 8px; font-size: 11px; }
  .widen a.on { font-weight: 700; text-decoration: none; }
  .venue { display: inline-block; width: 13px; height: 13px; line-height: 13px;
           text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700;
           color: #fff; margin-right: 5px; vertical-align: 1px; }
- .v-k { background: #2a6099; }
+ .v-k { background: var(--accent); }
  .v-p { background: #99542a; }
  /* On a tablet or phone the columns stack, and a nested scrolling panel is
     unusable, so the panels grow with the page instead. */
@@ -236,7 +275,7 @@ PAGE = """
    .cols { flex-direction: column; }
    .side, .nearby { width: auto; max-width: none; max-height: none;
                     overflow-y: visible; border: 0; padding: 0; }
-   .nearby { border-top: 1px solid #ddd; padding-top: 10px; }
+   .nearby { border-top: 1px solid var(--line); padding-top: 10px; }
  }
 </style>
 
@@ -657,7 +696,13 @@ _COUNTS = {"at": 0.0, "rows": None}
 
 
 # Bookkeeping, not data: the status page shows what they hold.
-HIDDEN_TABLES = ("kalshi_observations", "kalshi_scans", "kalshi_titles", "kalshi_tracking")
+# The programs' own bookkeeping, not data to browse: what is fetched and what is
+# still to do (tracking, scans, observations, Polymarket's feed and the minutes
+# waiting for their candle), the search's records and vectors, the daily
+# check, and leftovers of retired features.
+HIDDEN_TABLES = ("kalshi_observations", "kalshi_scans", "kalshi_titles", "kalshi_tracking",
+                 "poly_tracking", "poly_feed", "poly_dirty", "propositions", "templates",
+                 "template_vectors", "checks", "kalshi_perp_markets", "kalshi_perp_candles")
 
 
 def table_list(ttl=60):
@@ -712,32 +757,33 @@ def run(sql):
 
 STATS_PAGE = """
 <!doctype html>
+{{ THEME|safe }}
 <title>stats</title>
 <style>
  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1050px;
-        padding: 0 1rem; color: #222; line-height: 1.5; }
+        padding: 0 1rem; color: var(--ink); line-height: 1.5; }
  header { display: flex; align-items: baseline; gap: 18px; }
  header h2 { margin: 0 0 6px; } header h2 a { text-decoration: none; color: inherit; }
  header .links a { font-size: 13px; margin-right: 12px; }
  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 18px; }
- .col { border: 1px solid #ddd; border-radius: 6px; padding: 14px 16px; }
- .col.k { border-top: 3px solid #2a6099; } .col.p { border-top: 3px solid #99542a; }
+ .col { border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
+ .col.k { border-top: 3px solid var(--accent); } .col.p { border-top: 3px solid #99542a; }
  .col h3 { margin: 0 0 2px; font-size: 16px; }
  .col h3 a { font-size: 12px; font-weight: normal; margin-left: 8px; }
- .col .sub { color: #666; font-size: 12px; margin-bottom: 12px; }
+ .col .sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
  .big { font-size: 22px; font-weight: 700; }
  dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0 0 14px; }
- dt { color: #666; font-size: 13px; }
+ dt { color: var(--muted); font-size: 13px; }
  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
  table { border-collapse: collapse; width: 100%; font-size: 13px; }
- th, td { border-bottom: 1px solid #eee; padding: 3px 4px; text-align: right; }
+ th, td { border-bottom: 1px solid var(--line2); padding: 3px 4px; text-align: right; }
  th:first-child, td:first-child { text-align: left; }
- th { color: #666; font-weight: normal; font-size: 12px; }
- .bar { background: #dde6f2; display: inline-block; height: 8px; border-radius: 2px; }
- .bar.p { background: #f2e3dd; }
- .note { background: #f7f7f7; border-left: 3px solid #bbb; padding: 10px 14px;
+ th { color: var(--muted); font-weight: normal; font-size: 12px; }
+ .bar { background: var(--accent-line); display: inline-block; height: 8px; border-radius: 2px; }
+ .bar.p { background: var(--bad-soft); }
+ .note { background: var(--soft); border-left: 3px solid var(--line); padding: 10px 14px;
          font-size: 13px; margin: 20px 0 0; }
- h4 { margin: 16px 0 4px; font-size: 13px; color: #555; }
+ h4 { margin: 16px 0 4px; font-size: 13px; color: var(--muted); }
  @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
 </style>
 
@@ -865,58 +911,59 @@ MANAGE_PAGE = """
 </tr>
 {%- endmacro %}
 <!doctype html>
+{{ THEME|safe }}
 <title>manage</title>
 <style>
- body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #222; }
+ body { font-family: system-ui, sans-serif; margin: 1.5rem; color: var(--ink); }
  header { display: flex; align-items: baseline; gap: 18px; }
  header h2 { margin: 0 0 6px; } header h2 a { text-decoration: none; color: inherit; }
  header .links a { font-size: 13px; margin-right: 12px; }
  .cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 18px; }
- .card { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; min-width: 150px; }
+ .card { border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; min-width: 150px; }
  .card .n { font-size: 20px; font-weight: 700; }
- .card .l { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: .03em; }
- .card.k { border-top: 3px solid #2a6099; } .card.p { border-top: 3px solid #99542a; }
+ .card .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+ .card.k { border-top: 3px solid var(--accent); } .card.p { border-top: 3px solid #99542a; }
  .card.on { border-top: 3px solid #4a7; }
  table { border-collapse: collapse; width: 100%; font-size: 13px; }
- th, td { border-bottom: 1px solid #eee; padding: 4px 7px; text-align: left; }
- th { background: #f4f4f4; position: sticky; top: 0; font-size: 12px; }
+ th, td { border-bottom: 1px solid var(--line2); padding: 4px 7px; text-align: left; }
+ th { background: var(--soft); position: sticky; top: 0; font-size: 12px; }
  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
  .controls { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end;
-             margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #eee; }
+             margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line2); }
  .controls label { display: flex; flex-direction: column; font-size: 11px;
-                   text-transform: uppercase; letter-spacing: .03em; color: #666; }
+                   text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
  .controls select, .controls input { margin-top: 3px; padding: 4px 6px; font-size: 13px;
                                      text-transform: none; }
  .controls button { padding: 6px 12px; font-size: 13px; }
  .pill { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 11px; }
- .live { background: #e6f6e6; color: #262; }
- .done { background: #eee; color: #555; }
- .has { color: #262; font-weight: 700; }
- .idx { color: #999; font-size: 11px; }
- .pill.got { background: #e6f6e6; color: #262; font-weight: 700; }
- .pill.none { background: #f2f2f2; color: #888; }
- tr.empty td { background: #fcfcfc; color: #777; }
+ .live { background: var(--ok-soft); color: var(--ok); }
+ .done { background: var(--line2); color: var(--muted); }
+ .has { color: var(--ok); font-weight: 700; }
+ .idx { color: var(--faint); font-size: 11px; }
+ .pill.got { background: var(--ok-soft); color: var(--ok); font-weight: 700; }
+ .pill.none { background: var(--soft); color: var(--faint); }
+ tr.empty td { background: var(--soft2); color: var(--muted); }
  tr.empty td a { color: #6a7fa8; }
- .no { color: #999; }
- .refresh { background: #f6f9ff; border: 1px solid #ccd8ee; border-radius: 6px;
+ .no { color: var(--faint); }
+ .refresh { background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 6px;
             padding: 12px 14px; margin-top: 22px; }
- .refresh h3 { margin: 0 0 6px; font-size: 14px; color: #2a6099; }
- .refresh button { background: #2a6099; color: #fff; border: 0; padding: 6px 12px;
+ .refresh h3 { margin: 0 0 6px; font-size: 14px; color: var(--accent); }
+ .refresh button { background: var(--accent); color: #fff; border: 0; padding: 6px 12px;
                    border-radius: 3px; cursor: pointer; font-size: 13px;
                    margin-right: 6px; }
  .refresh button:hover { background: #1d4570; }
- .msg.err { background: #fff2f2; border-left-color: #c33; }
- .danger { background: #fff6f6; border: 1px solid #f0c0c0; border-radius: 6px;
+ .msg.err { background: var(--bad-soft); border-left-color: var(--bad); }
+ .danger { background: var(--bad-soft); border: 1px solid var(--bad-line); border-radius: 6px;
            padding: 12px 14px; margin-top: 22px; }
- .danger h3 { margin: 0 0 6px; font-size: 14px; color: #a33; }
- .danger button { background: #c33; color: #fff; border: 0; padding: 6px 12px;
+ .danger h3 { margin: 0 0 6px; font-size: 14px; color: var(--bad); }
+ .danger button { background: var(--bad); color: #fff; border: 0; padding: 6px 12px;
                   border-radius: 3px; cursor: pointer; font-size: 13px; }
- .msg { background: #eef7ee; border-left: 3px solid #4a4; padding: 6px 10px;
+ .msg { background: var(--ok-soft); border-left: 3px solid #4a4; padding: 6px 10px;
         margin-bottom: 10px; font-size: 13px; }
  .venue { display: inline-block; width: 13px; height: 13px; line-height: 13px;
           text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700;
           color: #fff; margin-right: 5px; }
- .v-k { background: #2a6099; } .v-p { background: #99542a; }
+ .v-k { background: var(--accent); } .v-p { background: #99542a; }
 </style>
 
 <header>
@@ -1079,10 +1126,9 @@ MANAGE_PAGE = """
     <button name="which" value="poly" type="submit">Polymarket &mdash; all sectors</button>
     <button name="which" value="kalshi_crypto" type="submit">Kalshi &mdash; crypto only</button>
     <button name="which" value="kalshi_all" type="submit">Kalshi &mdash; every sector</button>
-    <button name="which" value="perps" type="submit">Perpetuals</button>
   </form>
-  <p style="font-size:12px;color:#666;margin:8px 0 0">
-    Re-runs the scraper for the last 7 days plus anything still open, then loads it.
+  <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
+    Runs discovery's listing now instead of waiting for its next pass (every 15 minutes).
     New markets are added and existing rows refreshed; nothing is deleted.
     Polymarket takes a few minutes, Kalshi crypto around ten, every sector over an hour.
   </p>
@@ -1106,7 +1152,7 @@ MANAGE_PAGE = """
     </label>
     <button type="submit">delete</button>
   </form>
-  <p style="font-size:12px;color:#666;margin:8px 0 0">
+  <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
     Candles can always be re-downloaded on demand; market rows come back by re-running
     the scrapers. Nothing here touches the files in data/.
   </p>
@@ -1116,31 +1162,32 @@ MANAGE_PAGE = """
 
 HOME_PAGE = """
 <!doctype html>
+{{ THEME|safe }}
 <title>prediction_markets</title>
 <style>
  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1000px;
-        padding: 0 1rem; color: #222; line-height: 1.5; }
+        padding: 0 1rem; color: var(--ink); line-height: 1.5; }
  h1 { margin: 0 0 4px; font-size: 22px; }
- .sub { color: #666; margin-bottom: 22px; font-size: 14px; }
+ .sub { color: var(--muted); margin-bottom: 22px; font-size: 14px; }
  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
          gap: 14px; margin-bottom: 30px; }
- .card { border: 1px solid #ddd; border-radius: 6px; padding: 14px 16px;
+ .card { border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px;
          text-decoration: none; color: inherit; display: block; }
- .card:hover { border-color: #0645ad; background: #f8faff; }
+ .card:hover { border-color: var(--link); background: var(--accent-soft); }
  .card h3 { margin: 0 0 4px; font-size: 15px; }
- .card p { margin: 0 0 8px; font-size: 13px; color: #555; }
- .card .rows { font-size: 12px; color: #777; }
- .card .rows b { color: #222; }
- .k { border-left: 3px solid #2a6099; }
+ .card p { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+ .card .rows { font-size: 12px; color: var(--muted); }
+ .card .rows b { color: var(--ink); }
+ .k { border-left: 3px solid var(--accent); }
  .p { border-left: 3px solid #99542a; }
  h2 { font-size: 16px; margin: 26px 0 8px; }
  table.cmp { border-collapse: collapse; font-size: 13px; width: 100%; }
- table.cmp th, table.cmp td { border: 1px solid #ddd; padding: 6px 9px;
+ table.cmp th, table.cmp td { border: 1px solid var(--line); padding: 6px 9px;
                               text-align: left; vertical-align: top; }
- table.cmp th { background: #f4f4f4; }
- .note { background: #f7f7f7; border-left: 3px solid #bbb; padding: 10px 14px;
+ table.cmp th { background: var(--soft); }
+ .note { background: var(--soft); border-left: 3px solid var(--line); padding: 10px 14px;
          font-size: 13px; margin: 14px 0; }
- code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+ code { background: var(--soft); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
  .sub .links a { margin-left: 10px; font-size: 13px; }
 </style>
 
@@ -1162,14 +1209,6 @@ HOME_PAGE = """
       <b>{{ '{:,}'.format(counts.poly_events) }}</b> events &middot;
       <b>{{ '{:,}'.format(counts.poly_candles) }}</b> candles</div>
   </a>
-  {% if counts.kalshi_perp_markets %}
-  <a class="card k" href="/table/kalshi_perp_markets?dim=status">
-    <h3>Kalshi perpetuals</h3>
-    <p>Leveraged up/down contracts. No expiry, funding every 8 hours.</p>
-    <div class="rows"><b>{{ '{:,}'.format(counts.kalshi_perp_markets) }}</b> instruments &middot;
-      <b>{{ '{:,}'.format(counts.kalshi_perp_candles) }}</b> candles</div>
-  </a>
-  {% endif %}
   <a class="card" href="/visualise">
     <h3>Visualise</h3>
     <p>Candlestick chart for any market whose candles are downloaded,
@@ -1438,26 +1477,14 @@ def manage_rows():
 # through their scraper and the loader.
 REFRESH_JOBS = {"kalshi_crypto": "kalshi markets (crypto)",
                 "kalshi_all": "kalshi markets",
-                "poly": "polymarket markets",
-                "perps": "perpetuals"}
+                "poly": "polymarket markets"}
 
 
 def _refresh_steps(which):
     import catalogue
-    import subprocess
-
-    def script(*argv):
-        done = subprocess.run([sys.executable, *argv], cwd=str(paths.ROOT),
-                              capture_output=True, text=True, timeout=7200)
-        if done.returncode != 0:
-            tail = (done.stderr or done.stdout or "").strip().splitlines()[-1:]
-            raise RuntimeError(f"{argv[0]}: {tail[0] if tail else 'failed'}")
-
     return {"kalshi_crypto": [lambda: catalogue.sync_kalshi(categories=["Crypto"])],
             "kalshi_all": [catalogue.sync_series, catalogue.sync_kalshi],
-            "poly": [catalogue.sync_poly],
-            "perps": [lambda: script("kalshi_perps.py", "--days", "7"),
-                      lambda: script("load_db.py")]}[which]
+            "poly": [catalogue.sync_poly]}[which]
 
 
 def _run_refresh(job_id, which):
@@ -1547,59 +1574,59 @@ def manage_purge():
 
 STATUS_PAGE = """
 <!doctype html>
+{{ THEME|safe }}
 <title>status</title>
-{% if refresh %}<meta http-equiv="refresh" content="30">{% endif %}
 <style>
  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1150px;
-        padding: 0 1rem; color: #222; background: #fff; line-height: 1.5; }
+        padding: 0 1rem; color: var(--ink); background: var(--bg); line-height: 1.5; }
  header { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
  header h2 { margin: 0 0 6px; } header h2 a { text-decoration: none; color: inherit; }
  header .links a { font-size: 13px; margin-right: 12px; }
- .bar-nav { font-size: 13px; margin: 4px 0 14px; color: #666; }
+ .bar-nav { font-size: 13px; margin: 4px 0 14px; color: var(--muted); }
  .bar-nav a, .bar-nav b { margin-right: 10px; }
  .jump { font-size: 13px; margin: -6px 0 14px; }
  .jump a { margin-right: 12px; }
  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 10px; }
- .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; border-left-width: 4px; }
+ .tile { border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; border-left-width: 4px; }
  .tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
- .tile span { color: #666; font-size: 12px; }
+ .tile span { color: var(--muted); font-size: 12px; }
  .tile.good { border-left-color: #3a9a5b; } .tile.warn { border-left-color: #d9a400; }
- .tile.bad { border-left-color: #d9534f; } .tile.bad b { color: #b3261e; }
- h3.section { font-size: 17px; margin: 28px 0 0; padding-top: 14px; border-top: 2px solid #222; }
- h3.section small { color: #888; font-weight: normal; font-size: 13px; margin-left: 8px; }
- .col { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; margin-top: 12px; min-width: 0; }
+ .tile.bad { border-left-color: #d9534f; } .tile.bad b { color: var(--bad); }
+ h3.section { font-size: 17px; margin: 28px 0 0; padding-top: 14px; border-top: 2px solid var(--ink); }
+ h3.section small { color: var(--faint); font-weight: normal; font-size: 13px; margin-left: 8px; }
+ .col { border: 1px solid var(--line); border-radius: 6px; padding: 12px 16px; margin-top: 12px; min-width: 0; }
  .col h4 { margin: 0 0 8px; font-size: 14px; }
- .col h4 small { color: #888; font-weight: normal; font-size: 12px; margin-left: 6px; }
+ .col h4 small { color: var(--faint); font-weight: normal; font-size: 12px; margin-left: 6px; }
  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
  svg.chart { display: block; width: 100%; height: auto; }
- .axis { display: flex; justify-content: space-between; font-size: 11px; color: #888; }
- .legend { font-size: 12px; color: #555; margin-top: 6px; }
+ .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); }
+ .legend { font-size: 12px; color: var(--muted); margin-top: 6px; }
  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
              margin: 0 4px 0 12px; vertical-align: -1px; }
  .legend i:first-child { margin-left: 0; }
- .progress { background: #eef1f5; border-radius: 6px; height: 14px; overflow: hidden; }
- .progress div { background: #2a6099; height: 100%; }
+ .progress { background: var(--accent-soft); border-radius: 6px; height: 14px; overflow: hidden; }
+ .progress div { background: var(--accent); height: 100%; }
  .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
  .job, .hbar { display: grid; gap: 8px; align-items: center; font-size: 13px; padding: 3px 0; }
- .job { grid-template-columns: minmax(0, 2fr) 3fr auto; border-bottom: 1px solid #f0f0f0; }
+ .job { grid-template-columns: minmax(0, 2fr) 3fr auto; border-bottom: 1px solid var(--soft); }
  .hbar { grid-template-columns: minmax(0, 2fr) 3fr 60px; }
  .hbar a, .job a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
  .hbar .progress, .job .progress { height: 10px; }
- .hbar span { text-align: right; color: #555; font-variant-numeric: tabular-nums; }
+ .hbar span { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
  .job .progress div.done { background: #3a9a5b; } .job .progress div.failed { background: #d9534f; }
- .muted { color: #888; } .s2 { color: #1e7b34; } .s4 { color: #b06000; } .s5 { color: #b3261e; font-weight: 600; }
+ .muted { color: var(--faint); } .s2 { color: var(--ok); } .s4 { color: var(--warn); } .s5 { color: #b3261e; font-weight: 600; }
  details { margin-top: 12px; }
  summary { cursor: pointer; font-weight: 600; font-size: 14px; }
  .scroll { overflow-x: auto; }
  table { border-collapse: collapse; width: 100%; font-size: 13px; }
- th, td { border-bottom: 1px solid #eee; padding: 3px 6px; text-align: right; white-space: nowrap; }
+ th, td { border-bottom: 1px solid var(--line2); padding: 3px 6px; text-align: right; white-space: nowrap; }
  th:first-child, td:first-child, td.l, th.l { text-align: left; }
- th { color: #666; font-weight: normal; font-size: 12px; }
+ th { color: var(--muted); font-weight: normal; font-size: 12px; }
  td.wrap { white-space: normal; word-break: break-all; text-align: left; }
  .chk { display: inline-block; min-width: 34px; text-align: center; border-radius: 8px;
         font-size: 11px; padding: 1px 6px; font-weight: 700; }
- .chk-ok { background: #e6f6e6; color: #262; } .chk-warn { background: #fff4d6; color: #8a5a00; }
- .chk-fail { background: #fde2e1; color: #a12; }
+ .chk-ok { background: var(--ok-soft); color: var(--ok); } .chk-warn { background: var(--warn-soft); color: var(--warn); }
+ .chk-fail { background: var(--bad-soft); color: var(--bad); }
  @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
 </style>
 
@@ -1611,10 +1638,11 @@ STATUS_PAGE = """
   window:
   {% for w in windows %}{% if w == window %}<b>{{ w }}</b>{% else %}<a href="?window={{ w }}{% if not refresh %}&refresh=off{% endif %}">{{ w }}</a>{% endif %}{% endfor %}
   &middot;
-  {% if refresh %}refreshing every 30 s &middot; <a href="?window={{ window }}&refresh=off">pause</a>
+  {% if refresh %}updating every 30 s &middot; <a href="?window={{ window }}&refresh=off">pause</a>
   {% else %}paused &middot; <a href="?window={{ window }}">resume</a>{% endif %}
-  &middot; <span class="muted">as of {{ now }}</span>
+  &middot; <span class="muted">as of <span id="asof">{{ now }}</span></span>
 </div>
+<div id="live">
 <div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#poly">Polymarket</a><a href="#check">daily check</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
 
 <div class="tiles">
@@ -1625,7 +1653,7 @@ STATUS_PAGE = """
   <div class="tile"><b>{{ '{:,}'.format(c.live.candles) if c.live else '—' }}</b>
     <span>candles in live's last cycle{% if c.live %} &middot; {{ c.live.seconds }} s{% endif %}</span></div>
   <div class="tile"><b>{{ '{:,}'.format(c.hot.n) if c.hot else '—' }}</b><span>hot markets, fetched every minute</span></div>
-  <div class="tile {{ 'warn' if c.factor and c.factor < 1 else '' }}"><b>{{ c.used_now }}<span style="font-size:14px;color:#888"> / {{ c.limit }}</span></b>
+  <div class="tile {{ 'warn' if c.factor and c.factor < 1 else '' }}"><b>{{ c.used_now }}<span style="font-size:14px;color:var(--faint)"> / {{ c.limit }}</span></b>
     <span>Kalshi requests last minute{% if c.factor and c.factor < 1 %} &middot; cut to {{ '%.0f'|format(100 * c.factor) }}%{% endif %}</span></div>
   <div class="tile {{ 'good' if bf.left == 0 else '' }}"><b>{{ ('%.1f'|format(bf.pct) + '%') if bf.left is not none else '—' }}</b><span>backfill done</span></div>
 </div>
@@ -1660,7 +1688,7 @@ STATUS_PAGE = """
   {% if bf.left is not none %}
   <div class="two" style="gap:24px;align-items:center">
     <div>
-      <div class="big">{{ '%.1f'|format(bf.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">of markets have their history</span></div>
+      <div class="big">{{ '%.1f'|format(bf.pct) }}% <span style="font-size:14px;font-weight:normal;color:var(--muted)">of markets have their history</span></div>
       <div class="progress"><div style="width:{{ bf.pct }}%"></div></div>
       <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(bf.left) }} markets left &middot; {{ bf.pace|safe }}</div>
     </div>
@@ -1677,7 +1705,7 @@ STATUS_PAGE = """
   {{ m.budget_chart|safe }}
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
   <div class="legend">{% for name, colour in m.legend %}<i style="background:{{ colour }}"></i>{{ name }}{% endfor %}
-    {% if m.down %}<i style="background:#f6d5d4"></i>Kalshi unreachable{% endif %}</div>
+    {% if m.down %}<i style="background:var(--down)"></i>Kalshi unreachable{% endif %}</div>
 </div>
 
 <h3 class="section" id="poly">Polymarket <small>trades.py reads every trade; aggregate.py makes the candles</small></h3>
@@ -1689,11 +1717,11 @@ STATUS_PAGE = """
   <div class="tile"><b>{{ '{:,}'.format(p.recent) if p.recent is not none else '—' }}</b><span>trades stored in the last 5 min</span></div>
   <div class="tile {{ 'warn' if p.behind_markets else '' }}"><b>{{ '{:,}'.format(p.behind_markets) if p.behind_markets is not none else '—' }}</b><span>markets to catch up after a gap</span></div>
   <div class="tile {{ 'warn' if p.waiting and p.waiting > 5000 else '' }}"><b>{{ '{:,}'.format(p.waiting) if p.waiting is not none else '—' }}</b><span>minutes waiting for their candle</span></div>
-  <div class="tile"><b>{{ p.used }}<span style="font-size:14px;color:#888"> / {{ p.limit }}</span></b><span>Polymarket requests last minute</span></div>
+  <div class="tile"><b>{{ p.used }}<span style="font-size:14px;color:var(--faint)"> / {{ p.limit }}</span></b><span>Polymarket requests last minute</span></div>
 </div>
 <div class="col">
   {% if p.tracked %}
-  <div class="big">{{ '%.1f'|format(p.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">of Polymarket markets have their history</span></div>
+  <div class="big">{{ '%.1f'|format(p.pct) }}% <span style="font-size:14px;font-weight:normal;color:var(--muted)">of Polymarket markets have their history</span></div>
   <div class="progress"><div style="width:{{ p.pct }}%"></div></div>
   <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(p.left) }} markets left, about one request each &middot;
     {{ p.trades }} trades stored</div>
@@ -1734,7 +1762,7 @@ STATUS_PAGE = """
   <div class="col">
     <h4>Space by table</h4>
     {% for r in d.tables %}
-    <div class="hbar"><span style="text-align:left;color:#222">{{ r.name }}</span>
+    <div class="hbar"><span style="text-align:left;color:var(--ink)">{{ r.name }}</span>
       <div class="progress"><div style="width:{{ r.pct }}%"></div></div><span>{{ r.size }}</span></div>
     {% endfor %}
   </div>
@@ -1754,7 +1782,7 @@ STATUS_PAGE = """
   <h4>Response time <small>typical and slowest 5%, per {{ bucket_label }}</small></h4>
   {{ speed_chart|safe }}
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
-  <div class="legend"><i style="background:#2a6099"></i>typical<i style="background:#e07b39"></i>slowest 5%</div>
+  <div class="legend"><i style="background:var(--accent)"></i>typical<i style="background:#e07b39"></i>slowest 5%</div>
 </div>
 <div class="two">
   <div class="col">
@@ -1824,6 +1852,30 @@ STATUS_PAGE = """
   </div>
 </details>
 {% endif %}
+</div>
+{% if refresh %}
+<script>
+// Every 30 s, the page's numbers are fetched again and swapped in place:
+// no reload, no jump in the scroll, open details stay open; nothing while
+// the tab is hidden.
+(function () {
+  setInterval(function () {
+    if (document.hidden) return;
+    fetch(location.href).then(function (r) { return r.text(); }).then(function (html) {
+      var next = new DOMParser().parseFromString(html, 'text/html').getElementById('live');
+      var cur = document.getElementById('live');
+      if (!next || !cur) return;
+      var open = Array.prototype.map.call(cur.querySelectorAll('details[open]'),
+                                          function (d) { return d.id; });
+      open.forEach(function (id) { var d = id && next.querySelector('#' + id); if (d) d.open = true; });
+      cur.replaceWith(next);
+      var clock = document.getElementById('asof');
+      if (clock) clock.textContent = new Date().toTimeString().slice(0, 8);
+    }).catch(function () {});
+  }, 30000);
+})();
+</script>
+{% endif %}
 """
 
 # window: (length in seconds, seconds per bar, what a bar is called)
@@ -1831,7 +1883,7 @@ USAGE_WINDOWS = {"1h": (3600, 60, "1 min"), "24h": (86400, 600, "10 min"),
                  "7d": (7 * 86400, 3600, "1 hour"), "30d": (30 * 86400, 6 * 3600, "6 hours")}
 USAGE_TZ = ZoneInfo(os.environ.get("PGTIMEZONE", "Asia/Kolkata"))
 PROGRAM_COLOURS = [("discover", "#9aa3ad"), ("hot", "#e07b39"), ("warm", "#d9a400"),
-                   ("api", "#8e6bbf"), ("backfill", "#2a6099")]
+                   ("api", "#8e6bbf"), ("backfill", "var(--accent)")]
 CALLER_COLOURS = ["#2a6099", "#e07b39", "#3a9a5b", "#8e6bbf", "#c9a227", "#9aa3ad"]
 CHART_W, CHART_H = 1000, 150
 
@@ -1894,12 +1946,12 @@ def _bars_svg(buckets, colours, limit=None, shade=None, marks=None, height=CHART
     out = [f'<svg class="chart" viewBox="0 0 {CHART_W} {height + 14}" role="img">']
     for frac in (0.5, 1):
         y = height - height * frac
-        out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eee"/>'
-                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{_count(top * frac)}</text>')
+        out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="var(--line2)"/>'
+                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="var(--faint)">{_count(top * frac)}</text>')
     for i, b in enumerate(buckets):
         x = i * w
         if shade and shade[i]:
-            out.append(f'<rect x="{x:.2f}" y="0" width="{w:.2f}" height="{height}" fill="#f6d5d4"/>')
+            out.append(f'<rect x="{x:.2f}" y="0" width="{w:.2f}" height="{height}" fill="var(--down)"/>')
         y = height
         for name, colour in colours:
             v = b.get(name, 0)
@@ -1917,7 +1969,7 @@ def _bars_svg(buckets, colours, limit=None, shade=None, marks=None, height=CHART
                        f"{height - height * v / top:.1f}" for i, v in enumerate(limit))
         out.append(f'<polyline points="{pts}" fill="none" stroke="#b3261e" stroke-width="1.5"'
                    f' stroke-dasharray="6 4"/>')
-    out.append(f'<line x1="0" x2="{CHART_W}" y1="{height}" y2="{height}" stroke="#ccc"/></svg>')
+    out.append(f'<line x1="0" x2="{CHART_W}" y1="{height}" y2="{height}" stroke="var(--line)"/></svg>')
     return "".join(out)
 
 
@@ -1930,8 +1982,8 @@ def _lines_svg(series, height=CHART_H, unit=""):
     out = [f'<svg class="chart" viewBox="0 0 {CHART_W} {height + 14}" role="img">']
     for frac in (0.5, 1):
         y = height - height * frac
-        out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eee"/>'
-                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="#999">{_count(top * frac)}{unit}</text>')
+        out.append(f'<line x1="0" x2="{CHART_W}" y1="{y:.1f}" y2="{y:.1f}" stroke="var(--line2)"/>'
+                   f'<text x="2" y="{y + 11:.1f}" font-size="11" fill="var(--faint)">{_count(top * frac)}{unit}</text>')
     for colour, vals in series:
         run = []
         for i, v in enumerate(vals + [None]):
@@ -1944,7 +1996,7 @@ def _lines_svg(series, height=CHART_H, unit=""):
                 run = []
             else:
                 run.append((i * step, height - height * v / top))
-    out.append(f'<line x1="0" x2="{CHART_W}" y1="{height}" y2="{height}" stroke="#ccc"/></svg>')
+    out.append(f'<line x1="0" x2="{CHART_W}" y1="{height}" y2="{height}" stroke="var(--line)"/></svg>')
     return "".join(out)
 
 
@@ -2106,13 +2158,13 @@ def _monitor_charts(starts, step):
         else:
             pace = "not moving in the last 6 h" if len(recent) > 1 else "measuring the pace"
         bf = {"left": left, "pct": max(0.0, min(100.0, 100 * (1 - left / total))) if total else 0,
-              "pace": pace, "chart": _lines_svg([("#2a6099", [c[1] for c in counts])], height=90)}
+              "pace": pace, "chart": _lines_svg([("var(--accent)", [c[1] for c in counts])], height=90)}
     return {"budget_chart": _bars_svg(budget, PROGRAM_COLOURS, limit=limit, shade=down),
             "legend": PROGRAM_COLOURS, "down": any(down),
-            "behind_chart": _lines_svg([("#2a6099", behind)], unit=" s"),
+            "behind_chart": _lines_svg([("var(--accent)", behind)], unit=" s"),
             "candles_chart": _bars_svg(candles, [("live", "#e07b39")]),
-            "backfill_chart": _bars_svg(backfill, [("backfill", "#2a6099")], height=100),
-            "stored_chart": _lines_svg([("#2a6099", [c[1] for c in stored] or [None])])}, bf
+            "backfill_chart": _bars_svg(backfill, [("backfill", "var(--accent)")], height=100),
+            "stored_chart": _lines_svg([("var(--accent)", [c[1] for c in stored] or [None])])}, bf
 
 
 @app.route("/api-usage")
@@ -2193,7 +2245,7 @@ def status_page():
                percentile_cont(0.5) WITHIN GROUP (ORDER BY ms) AS p50,
                percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS p95
         FROM api_requests r WHERE {where} GROUP BY 1""", since)}
-    speed_chart = _lines_svg([("#2a6099", [speed[s]["p50"] if s in speed else None for s in starts]),
+    speed_chart = _lines_svg([("var(--accent)", [speed[s]["p50"] if s in speed else None for s in starts]),
                               ("#e07b39", [speed[s]["p95"] if s in speed else None for s in starts])],
                              unit=" ms")
     tickers = db.query(f"""
@@ -2318,7 +2370,7 @@ def _stats_data():
 def index():
     counts = dict(table_list())
     for name in ("kalshi_markets", "kalshi_series", "kalshi_events", "kalshi_candles", "poly_markets",
-                 "poly_events", "poly_candles", "kalshi_perp_markets", "kalshi_perp_candles"):
+                 "poly_events", "poly_candles"):
         counts.setdefault(name, 0)
     return render_template_string(HOME_PAGE, counts=counts)
 
@@ -2332,8 +2384,6 @@ DIMENSIONS = {
     "kalshi_series": ["category", "frequency"],
     "kalshi_events": ["category", "series_ticker"],
     "poly_events": ["category"],
-    "kalshi_perp_markets": ["status"],
-    "kalshi_perp_candles": ["status"],
 }
 
 
@@ -2388,6 +2438,9 @@ def nearest_titles(text):
     return found
 
 
+_related_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="related")
+
+
 def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
     """Markets whose wording resembles this one, on either venue.
 
@@ -2418,11 +2471,11 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
     # it is worded differently -- never makes the cut.
     per = max(6, limit // 2)
     args = {"t": text, "id": ident, "thr": threshold, "per": per}
-    rows = []
-    with connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if same_venue or name in POLY:
-                scores = {t: sc for t, sc in nearest_titles(text) if sc >= threshold}
+
+    def kalshi_side():
+        scores = {t: sc for t, sc in nearest_titles(text) if sc >= threshold}
+        with connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
                            m.title, e.category, m.volume,
@@ -2434,9 +2487,12 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
                     ORDER BY m.title, m.volume DESC NULLS LAST""",
                             dict(args, titles=list(scores)))
                 found = [dict(r, score=scores[r["title"]]) for r in cur.fetchall()]
-                found.sort(key=lambda r: (-r["score"], -float(r["volume"] or 0)))
-                rows += found[:per]
-            if same_venue or name not in POLY:
+        found.sort(key=lambda r: (-r["score"], -float(r["volume"] or 0)))
+        return found[:per]
+
+    def poly_side():
+        with connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # The % operator filters at pg_trgm's own similarity_threshold
                 # (0.3 by default), so a slider set lower than that would
                 # silently do nothing. Set it so the index and the slider agree.
@@ -2454,7 +2510,16 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
                         ORDER BY p.question, p.volume DESC NULLS LAST) x
                     WHERE score >= %(thr)s
                     ORDER BY score DESC, volume DESC NULLS LAST LIMIT %(per)s""", args)
-                rows += cur.fetchall()
+                return cur.fetchall()
+
+    # The two venues are searched at the same time, each on its own
+    # connection: the panel waits for the slower one, not for both in turn.
+    sides = []
+    if same_venue or name in POLY:
+        sides.append(kalshi_side)
+    if same_venue or name not in POLY:
+        sides.append(poly_side)
+    rows = [r for part in _related_pool.map(lambda f: f(), sides) for r in part]
 
     # Show which words drove the match, so a low score is interpretable.
     stop = {"the","a","an","will","be","by","on","in","at","to","of","and","or",
@@ -2768,8 +2833,7 @@ def _table_query(name, asset, ticker, dim, q):
                       "poly_markets": ["condition_id", "question", "slug"],
                       "kalshi_series": ["series_ticker", "title"],
                       "kalshi_events": ["event_ticker", "title", "sub_title"],
-                      "poly_events": ["event_id", "title", "slug"],
-                      "kalshi_perp_markets": ["ticker"]}
+                      "poly_events": ["event_id", "title", "slug"]}
                      .get(name, [key]))
         clause = " OR ".join(f"{c}::text ILIKE %s" for c in text_cols)
         where += (" AND " if where else " WHERE ") + f"({clause})"
@@ -2803,8 +2867,7 @@ def table_rows():
                        request.args.get("dim", ""), (request.args.get("q") or "").strip(),
                        page, offset)
     cols = [c for c in (rows[0].keys() if rows else []) if c != "raw"]
-    candle_table = {"kalshi_markets": "kalshi_candles", "kalshi_perp_markets": "kalshi_perp_candles",
-                    "poly_markets": "poly_candles"}.get(name)
+    candle_table = {"kalshi_markets": "kalshi_candles", "poly_markets": "poly_candles"}.get(name)
     tmpl = app.jinja_env.from_string(TABLE_ROWS)
     return jsonify({"html": tmpl.render(rows=rows, cols=cols, candle_table=candle_table,
                                         start=offset),
@@ -2841,9 +2904,7 @@ def table(name):
                           "limit": "all" if cap is None else cap})
 
     # Clicking a ticker in a market table jumps to that market's candles.
-    candle_table = {"kalshi_markets": "kalshi_candles",
-                    "kalshi_perp_markets": "kalshi_perp_candles",
-                    "poly_markets": "poly_candles"}.get(name)
+    candle_table = {"kalshi_markets": "kalshi_candles", "poly_markets": "poly_candles"}.get(name)
 
     # A candle table shows only ids and numbers, so say what the market is.
     detail = None
@@ -2942,9 +3003,10 @@ def table(name):
 
 VISUALISE_PAGE = """
 <!doctype html>
+{{ THEME|safe }}
 <title>visualise</title>
 <style>
- body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #222; }
+ body { font-family: system-ui, sans-serif; margin: 1.5rem; color: var(--ink); }
  header { display: flex; align-items: baseline; gap: 18px; }
  header h2 { margin: 0 0 10px; }
  header .links a { font-size: 13px; margin-right: 12px; }
@@ -2952,26 +3014,26 @@ VISUALISE_PAGE = """
              flex-wrap: wrap; }
  form.pick input[name=ticker] { width: 340px; padding: 5px 8px; font-size: 13px; }
  form.pick select, form.pick button { padding: 5px 8px; font-size: 13px; }
- .hint { font-size: 12px; color: #777; margin-bottom: 14px; }
- .wrap { position: relative; border: 1px solid #ddd; border-radius: 4px;
-         padding: 8px; background: #fff; }
+ .hint { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+ .wrap { position: relative; border: 1px solid var(--line); border-radius: 4px;
+         padding: 8px; background: var(--bg); }
  canvas { display: block; width: 100%; height: 520px; }
- #tip { position: absolute; pointer-events: none; display: none; background: #fff;
-        border: 1px solid #bbb; border-radius: 4px; padding: 6px 9px; font-size: 12px;
+ #tip { position: absolute; pointer-events: none; display: none; background: var(--bg);
+        border: 1px solid var(--line); border-radius: 4px; padding: 6px 9px; font-size: 12px;
         box-shadow: 0 1px 4px rgba(0,0,0,.15); white-space: nowrap; z-index: 2; }
  #tip b { display: block; margin-bottom: 3px; }
- #tip span { color: #666; }
- .bar { font-size: 12px; color: #666; margin-top: 8px; }
- .bar b { color: #222; }
- .err { color: #b00; }
+ #tip span { color: var(--muted); }
+ .bar { font-size: 12px; color: var(--muted); margin-top: 8px; }
+ .bar b { color: var(--ink); }
+ .err { color: var(--bad); }
  .avail { margin-top: 26px; font-size: 13px; }
  .avail table { border-collapse: collapse; font-size: 13px; }
- .avail th, .avail td { border: 1px solid #ddd; padding: 4px 9px; text-align: left; }
- .avail th { background: #f2f2f2; }
+ .avail th, .avail td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
+ .avail th { background: var(--soft); }
  .venue { display: inline-block; width: 15px; height: 15px; line-height: 15px;
           text-align: center; border-radius: 3px; font-size: 10px; color: #fff;
           margin-right: 5px; }
- .v-k { background: #2a6099; } .v-p { background: #99542a; }
+ .v-k { background: var(--accent); } .v-p { background: #99542a; }
 </style>
 
 <header>
@@ -3005,6 +3067,7 @@ VISUALISE_PAGE = """
   <script>
   (function () {
     var cv = document.getElementById('chart'), tip = document.getElementById('tip');
+    var C = function (name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); };
     var status = document.getElementById('status'), ctx = cv.getContext('2d');
     var bars = [], lo = 0, hi = 1, vmax = 1, geom = null;
     var PAD = {l: 54, r: 14, t: 12, b: 26}, VOL = 70;
@@ -3028,7 +3091,7 @@ VISUALISE_PAGE = """
       if (!bars.length) return;
       var bw = geom.plotW / bars.length, body = Math.max(1, Math.min(bw * 0.7, 14));
 
-      ctx.strokeStyle = '#eee'; ctx.fillStyle = '#888';
+      ctx.strokeStyle = C('--line2'); ctx.fillStyle = C('--faint');
       ctx.font = '11px system-ui'; ctx.textAlign = 'right';
       for (var g = 0; g <= 4; g++) {
         var v = lo + (hi - lo) * g / 4, py = Math.round(y(v)) + 0.5;
@@ -3042,7 +3105,7 @@ VISUALISE_PAGE = """
         // Most minutes here are a quoted mid with no trade, so open == close is
         // the common case -- draw those as a flat tick rather than a body.
         var up = b[4] > b[1], flat = b[4] === b[1];
-        ctx.strokeStyle = ctx.fillStyle = flat ? '#999' : (up ? '#1a9c5b' : '#cc3d3d');
+        ctx.strokeStyle = ctx.fillStyle = flat ? C('--faint') : (up ? '#1a9c5b' : '#cc3d3d');
         ctx.beginPath();
         ctx.moveTo(Math.round(cx) + 0.5, y(b[2]));
         ctx.lineTo(Math.round(cx) + 0.5, y(b[3]));
@@ -3053,21 +3116,21 @@ VISUALISE_PAGE = """
       }
 
       if (vmax > 0) {
-        ctx.fillStyle = '#c9d4e4';
+        ctx.fillStyle = C('--accent-line');
         for (var j = 0; j < bars.length; j++) {
           var vh = bars[j][5] / vmax * geom.volH;
           if (vh > 0) ctx.fillRect(x(j) - body / 2, geom.volTop + geom.volH - vh, body, vh);
         }
-        ctx.strokeStyle = '#eee'; ctx.beginPath();
+        ctx.strokeStyle = C('--line2'); ctx.beginPath();
         ctx.moveTo(geom.left, geom.volTop + geom.volH + 0.5);
         ctx.lineTo(geom.left + geom.plotW, geom.volTop + geom.volH + 0.5); ctx.stroke();
-        ctx.fillStyle = '#888'; ctx.textAlign = 'right';
+        ctx.fillStyle = C('--faint'); ctx.textAlign = 'right';
         ctx.fillText(fmt(vmax), geom.left - 6, geom.volTop + 10);
       }
 
       // Labels come from the bars themselves: the series is irregular, so evenly
       // spaced ticks would imply a regular spacing that is not there.
-      ctx.fillStyle = '#888'; ctx.textAlign = 'center';
+      ctx.fillStyle = C('--faint'); ctx.textAlign = 'center';
       var step = Math.max(1, Math.floor(bars.length / 5));
       for (var k = 0; k < bars.length; k += step) {
         ctx.fillText(stamp(bars[k][0], true), x(k), geom.h - 8);
@@ -3092,7 +3155,7 @@ VISUALISE_PAGE = """
       if (i < 0 || i >= bars.length) { tip.style.display = 'none'; draw(); return; }
       var b = bars[i];
       draw();
-      ctx.strokeStyle = '#bbb'; ctx.setLineDash([3, 3]); ctx.beginPath();
+      ctx.strokeStyle = C('--line'); ctx.setLineDash([3, 3]); ctx.beginPath();
       ctx.moveTo(Math.round(x(i)) + 0.5, geom.priceTop);
       ctx.lineTo(Math.round(x(i)) + 0.5, geom.priceTop + geom.priceH);
       ctx.stroke(); ctx.setLineDash([]);
@@ -3111,6 +3174,7 @@ VISUALISE_PAGE = """
     });
     cv.addEventListener('mouseleave', function () { tip.style.display = 'none'; draw(); });
     window.addEventListener('resize', draw);
+    window.addEventListener('themechange', draw);
 
     fetch('/visualise/data?ticker={{ ticker|urlencode }}&interval={{ interval|urlencode }}')
       .then(function (r) { return r.json(); })

@@ -130,29 +130,19 @@ CREATE UNLOGGED TABLE IF NOT EXISTS kalshi_observations (
 CREATE INDEX IF NOT EXISTS kalshi_observations_scan_idx ON kalshi_observations (scan_id);
 
 
--- Perpetual futures. contract_size is needed to read the price at all: a
--- KXBTCPERP close of 6.3865 with contract_size 0.0001 means $63,865 per BTC.
-CREATE TABLE IF NOT EXISTS kalshi_perp_markets (
-    ticker        TEXT PRIMARY KEY,
-    contract_size NUMERIC(20, 6),
-    tick_size     NUMERIC(20, 6),
-    status        TEXT,
-    raw           JSONB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS kalshi_perp_candles (
-    ticker        TEXT NOT NULL REFERENCES kalshi_perp_markets (ticker) ON DELETE CASCADE,
-    ts            TIMESTAMPTZ NOT NULL,
-    open          NUMERIC(20, 6),
-    high          NUMERIC(20, 6),
-    low           NUMERIC(20, 6),
-    close         NUMERIC(20, 6),
-    volume        NUMERIC(20, 4),
-    open_interest NUMERIC(20, 4),
-    PRIMARY KEY (ticker, ts)
-);
-
-CREATE INDEX IF NOT EXISTS kalshi_perp_candles_ts_idx ON kalshi_perp_candles (ts);
+-- Kalshi's perpetual futures were dropped on 3 Nov 2026 (never collected
+-- here); their empty tables go. A table that somehow holds rows is kept.
+DO $$
+BEGIN
+    IF to_regclass('kalshi_perp_candles') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM kalshi_perp_candles) THEN
+        DROP TABLE kalshi_perp_candles;
+    END IF;
+    IF to_regclass('kalshi_perp_markets') IS NOT NULL AND to_regclass('kalshi_perp_candles') IS NULL
+       AND NOT EXISTS (SELECT 1 FROM kalshi_perp_markets) THEN
+        DROP TABLE kalshi_perp_markets;
+    END IF;
+END $$;
 
 
 -- ---------------------------------------------------------------------------
@@ -490,13 +480,12 @@ DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns
                WHERE table_schema = current_schema() AND column_name = 'filled'
-                 AND table_name IN ('kalshi_candles', 'poly_candles', 'kalshi_perp_candles')) THEN
+                 AND table_name IN ('kalshi_candles', 'poly_candles')) THEN
         DROP VIEW IF EXISTS candles_1m, candles_5m, candles_15m, candles_1h;
         DROP MATERIALIZED VIEW IF EXISTS kalshi_candles_1h, kalshi_candles_15m,
             kalshi_candles_5m, poly_candles_1h, poly_candles_15m, poly_candles_5m CASCADE;
         ALTER TABLE kalshi_candles DROP COLUMN IF EXISTS filled;
         ALTER TABLE poly_candles DROP COLUMN IF EXISTS filled;
-        ALTER TABLE kalshi_perp_candles DROP COLUMN IF EXISTS filled;
     END IF;
 END $$;
 

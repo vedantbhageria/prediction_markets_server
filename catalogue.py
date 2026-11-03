@@ -34,7 +34,6 @@ import settings
 import store
 import venues
 from db import connection
-from load_db import num
 
 SERIES_COLS = ["series_ticker", "category", "title", "frequency"]
 EVENT_COLS = ["event_ticker", "series_ticker", "title", "sub_title", "category",
@@ -55,6 +54,14 @@ POLY_WATCH = ["closed", "volume", "liquidity", "end_date", "question"]
 # Most stored markets re-read per pass after leaving a venue's open list.
 STALE_MAX = 5000
 
+
+
+def num(value):
+    """Kalshi sends numbers as strings; missing ones as None or ''."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 def _expired(stamp):
     """True if this close time is already past retention.
