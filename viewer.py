@@ -1313,7 +1313,7 @@ MANAGE_KALSHI = """
            to_char(c.last_ts, 'YYYY-MM-DD HH24:MI') AS last, {key} AS k
     FROM {source}
     JOIN kalshi_events e USING (event_ticker)
-    WHERE {where} ORDER BY {key} DESC NULLS LAST, m.ticker LIMIT %s"""
+    WHERE {where} ORDER BY {order} LIMIT %s"""
 MANAGE_POLY = """
     SELECT 'poly' AS venue, p.condition_id AS id, p.question AS title, e.category,
            p.closed IS NOT TRUE AS active, NULL AS opened,
@@ -1322,7 +1322,7 @@ MANAGE_POLY = """
            to_char(c.last_ts, 'YYYY-MM-DD HH24:MI') AS last, {key} AS k
     FROM {source}
     LEFT JOIN poly_events e USING (event_id)
-    WHERE {where} ORDER BY {key} DESC NULLS LAST, p.condition_id LIMIT %s"""
+    WHERE {where} ORDER BY {order} LIMIT %s"""
 
 
 def _manage_rows(venue, state, category, sort, q, limit, offset=0):
@@ -1337,9 +1337,9 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
     n = offset + limit
     parts = []
 
-    def part(template, source, key, cond, args):
-        parts.append((template.format(source=source, key=key, where=" AND ".join(cond)),
-                      args + [n]))
+    def part(template, source, key, order, cond, args):
+        parts.append((template.format(source=source, key=key, order=order,
+                                      where=" AND ".join(cond)), args + [n]))
 
     for v, template, key_col, title, cid, counts, closed in (
             ("kalshi", MANAGE_KALSHI, "m.ticker", "m.title", "m.ticker", "kalshi_candle_counts",
@@ -1362,14 +1362,18 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
         with_counts = f"{counts} c JOIN {markets} ON {join}"
         without = f"{markets} LEFT JOIN {counts} c ON {join}"
         if sort == "candles":
+            # (counts_n_idx is (n DESC, id): the order must be exactly that)
             if state != "nodata":
-                part(template, with_counts, "c.n", cond, args)
+                part(template, with_counts, "c.n", f"c.n DESC, c.{key_col.split('.')[1]}", cond, args)
             if state != "withdata":
-                part(template, without, "NULL::bigint", cond + ["c.n IS NULL"], args)
+                part(template, without, "NULL::bigint", key_col, cond + ["c.n IS NULL"], args)
             continue
-        key = MANAGE_SORTS[sort][0 if v == "kalshi" else 1] or "NULL::numeric"
+        key = MANAGE_SORTS[sort][0 if v == "kalshi" else 1]
         extra = {"withdata": ["c.n IS NOT NULL"], "nodata": ["c.n IS NULL"]}.get(state, [])
-        part(template, without, key, cond + extra, args)
+        if key:
+            part(template, without, key, f"{key} DESC NULLS LAST, {key_col}", cond + extra, args)
+        else:                       # Polymarket has no open time: its markets by id
+            part(template, without, "NULL::timestamptz", key_col, cond + extra, args)
 
     if not parts:
         return []
@@ -1377,8 +1381,8 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
              "close": "k DESC NULLS LAST", "open": "k DESC NULLS LAST"}[sort]
     # A stable tiebreak keeps paging from repeating or skipping rows when the
     # sort column has ties (it usually does -- volume 0, no candles).
-    sql = (" UNION ALL ".join(f"({s})" for s, _ in parts)
-           + f" ORDER BY {order}, id LIMIT %s OFFSET %s")
+    sql = ("SELECT * FROM (" + " UNION ALL ".join(f"({s})" for s, _ in parts)
+           + f") x ORDER BY {order}, id LIMIT %s OFFSET %s")
     rows = db.query(sql, tuple(a for _, args in parts for a in args) + (limit, offset))
     # Kalshi's short outcome name lives in the stored listing; read it only for
     # the rows shown, not for every market the query sorted.
@@ -2476,15 +2480,18 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
         scores = {t: sc for t, sc in nearest_titles(text) if sc >= threshold}
         with connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Each title's busiest market first, then only those few are
+                # joined and looked up (a ladder has hundreds per title).
                 cur.execute("""
-                    SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
-                           m.title, e.category, m.volume,
-                           to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
-                           EXISTS (SELECT 1 FROM kalshi_candles c
-                                   WHERE c.ticker = m.ticker) AS got
-                    FROM kalshi_markets m JOIN kalshi_events e USING (event_ticker)
-                    WHERE m.title = ANY(%(titles)s) AND m.ticker <> %(id)s
-                    ORDER BY m.title, m.volume DESC NULLS LAST""",
+                    SELECT d.*, e.category,
+                           EXISTS (SELECT 1 FROM kalshi_candles c WHERE c.ticker = d.id) AS got
+                    FROM (SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
+                                 m.title, m.event_ticker, m.volume,
+                                 to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes
+                          FROM kalshi_markets m
+                          WHERE m.title = ANY(%(titles)s) AND m.ticker <> %(id)s
+                          ORDER BY m.title, m.volume DESC NULLS LAST) d
+                    JOIN kalshi_events e USING (event_ticker)""",
                             dict(args, titles=list(scores)))
                 found = [dict(r, score=scores[r["title"]]) for r in cur.fetchall()]
         found.sort(key=lambda r: (-r["score"], -float(r["volume"] or 0)))
@@ -2493,23 +2500,24 @@ def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
     def poly_side():
         with connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # The % operator filters at pg_trgm's own similarity_threshold
-                # (0.3 by default), so a slider set lower than that would
-                # silently do nothing. Set it so the index and the slider agree.
-                cur.execute("SET LOCAL pg_trgm.similarity_threshold = %s", (threshold,))
+                # The nearest questions first, through the GiST index
+                # (ORDER BY question <-> text), as Kalshi's titles are: a
+                # filter on similarity read every candidate of 1.6 million.
                 cur.execute("""
-                    SELECT * FROM (
-                        SELECT DISTINCT ON (p.question) 'poly' AS venue, p.condition_id AS id,
-                               p.question AS title, e.category, p.volume,
-                               similarity(p.question, %(t)s) AS score,
-                               to_char(p.end_date, 'YYYY-MM-DD HH24:MI') AS closes,
-                               EXISTS (SELECT 1 FROM poly_candles c
-                                       WHERE c.condition_id = p.condition_id) AS got
-                        FROM poly_markets p LEFT JOIN poly_events e USING (event_id)
-                        WHERE p.question %% %(t)s AND p.condition_id <> %(id)s
-                        ORDER BY p.question, p.volume DESC NULLS LAST) x
-                    WHERE score >= %(thr)s
-                    ORDER BY score DESC, volume DESC NULLS LAST LIMIT %(per)s""", args)
+                    SELECT y.*, e.category,
+                           EXISTS (SELECT 1 FROM poly_candles c WHERE c.condition_id = y.id) AS got
+                    FROM (SELECT DISTINCT ON (x.question) 'poly' AS venue, x.condition_id AS id,
+                                 x.question AS title, x.event_id, x.volume, x.score,
+                                 to_char(x.end_date, 'YYYY-MM-DD HH24:MI') AS closes
+                          FROM (SELECT p.condition_id, p.question, p.event_id, p.volume, p.end_date,
+                                       similarity(p.question, %(t)s) AS score
+                                FROM poly_markets p WHERE p.condition_id <> %(id)s
+                                ORDER BY p.question <-> %(t)s LIMIT %(near)s) x
+                          ORDER BY x.question, x.volume DESC NULLS LAST) y
+                    LEFT JOIN poly_events e USING (event_id)
+                    WHERE y.score >= %(thr)s
+                    ORDER BY y.score DESC, y.volume DESC NULLS LAST LIMIT %(per)s""",
+                            dict(args, near=NEAREST_TITLES))
                 return cur.fetchall()
 
     # The two venues are searched at the same time, each on its own

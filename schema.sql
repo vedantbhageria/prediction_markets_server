@@ -354,6 +354,11 @@ CREATE INDEX IF NOT EXISTS kalshi_markets_title_hash_idx
     ON kalshi_markets USING hash (title);
 CREATE INDEX IF NOT EXISTS poly_markets_question_trgm_idx
     ON poly_markets USING gin (question gin_trgm_ops);
+-- Nearest questions first (ORDER BY question <-> text), for the viewer's
+-- related-wording panel: filtering 1.6 million questions by similarity took
+-- seconds. Built on the server with CREATE INDEX CONCURRENTLY on 3 Nov 2026.
+CREATE INDEX IF NOT EXISTS poly_markets_question_gist_idx
+    ON poly_markets USING gist (question gist_trgm_ops);
 
 
 -- ---------------------------------------------------------------------------
