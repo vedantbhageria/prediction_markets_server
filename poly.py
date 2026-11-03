@@ -1,18 +1,19 @@
 """Polymarket trades: read, store, book-keep.
 
 Shared by trades.py (the feed of every trade, and catching up after a gap),
-backfill.py (history) and the API's pushed backfills. aggregate.py turns the
-stored trades into candles; nothing here makes candles, except the midpoint
-fallback below.
+backfill.py (history), the API's pushed backfills and the viewer's download
+button. aggregate.py turns the stored trades into candles; nothing here makes
+candles.
 
 Two ways to read trades (data API v2), both newest first, a page of 1,000 at
-a time followed by cursor (see read_list):
+a time followed by cursor (see pages):
 
     the feed      every trade on Polymarket -- about 15 a second. trades.py
                   reads it every few seconds, back to where it last reached
                   (at most POLY_FEED_MOST trades).
-    one market    every trade in one market. For all but the busiest that is
-                  its whole life, in one request.
+    one market    every trade in one market, back to its first: for all but
+                  the busiest one request. Stored POLY_MARKET_BATCH at a time
+                  as it is read, so a market of any size is read whole.
 
 What a read covers is never taken from the clock (v1 answered from copies
 running minutes behind; the margins are kept):
@@ -43,8 +44,6 @@ log = logging.getLogger("poly")
 
 LOCK = ("SELECT 1 FROM poly_tracking WHERE condition_id = ANY(%s)"
         " ORDER BY condition_id FOR UPDATE")
-# Midpoint history is asked for a day at a time.
-MID_STEP = 86400
 
 
 def stamp(ts):
@@ -66,29 +65,31 @@ def row(t):
         return None
 
 
-def read_list(market, since, most, stop=None):
+def pages(market, since, stop=None):
     """A trade list -- one market's, or with `market` None the feed of every
     trade -- newest first, back to `since` (unix time, or None for as far as
-    it goes) but no more than about `most` trades. Returns (trades, reached):
-    `reached` is False if it stopped at `most` before getting there.
+    it goes), a page at a time.
 
     Pages after the first follow the venue's cursor, which carries the
     (time, sequence) of the last trade read: each page goes on strictly
     below the one before, so pages neither overlap nor leave holes."""
-    out, cursor = [], None
+    cursor = None
     while True:
         page, cursor = venues.poly_trades(market, cursor, stop)
-        out += page
+        if page:
+            yield page
         if not cursor or not page or (since is not None and int(page[-1]["timestamp"]) < since):
-            return out, True
-        if len(out) >= most:
-            return out, False
+            return
 
 
 def write_trades(cur, trades):
     """Store trades (the venue's dicts) not stored yet, and mark the minutes
     they fall in for aggregate.py. Returns how many were new."""
-    rows = sorted({r[0:3]: r for r in map(row, trades) if r is not None}.values(),
+    made = list(map(row, trades))
+    if None in made:
+        # The venue left out or renamed a field we need (check.py looks for this).
+        log.warning("trades without the fields needed: %d of %d", made.count(None), len(made))
+    rows = sorted({r[0:3]: r for r in made if r is not None}.values(),
                   key=lambda r: (r[0], r[1], r[2]))
     if not rows:
         return 0
@@ -113,19 +114,12 @@ def write_trades(cur, trades):
 # One market
 # ---------------------------------------------------------------------------
 
-def read_market(cid, since, stop=None):
-    """Every trade of one market back to `since` (unix time) that the venue
-    will list, newest first. Returns (trades, whole): `whole` is True if the
-    list reached `since` or the market's first trade, False if it was cut off
-    -- then nothing older than its oldest trade can be had this way."""
-    return read_list(cid, since, settings.POLY_MARKET_MOST, stop)
-
-
 def fetch_market(cid, stop=None, since=None):
     """Read one market's trades as far back as its history needs (or to
     `since`, unix time), store them and record what is now covered. Returns
-    (new trades, whole) or None if the market is not tracked or the venue
-    failed."""
+    the number of new trades, or None if the market is not tracked or the
+    venue failed -- what was stored before the failure stays, with its
+    coverage."""
     t = db.query("SELECT EXTRACT(EPOCH FROM history_from) AS h,"
                  " EXTRACT(EPOCH FROM trades_from) AS f,"
                  " EXTRACT(EPOCH FROM poly_covered_to(trades_to)) AS c"
@@ -134,29 +128,37 @@ def fetch_market(cid, stop=None, since=None):
         return None
     # Back to the start of its history if that is still missing, else to
     # where its coverage ends -- with a minute either side to spare.
-    have_from, covered = float(t[0]["f"]), float(t[0]["c"])
+    start, have_from, covered = float(t[0]["h"]), float(t[0]["f"]), float(t[0]["c"])
     if since is None:
-        since = (float(t[0]["h"]) if have_from > float(t[0]["h"]) else covered) - 60
-    asked = time.time()
+        since = (start if have_from > start else covered) - 60
+    # Each batch covers [just after its oldest trade, where the batch before
+    # began) -- the second it stopped in may have more, which the next batch
+    # reads. The first goes up to when the list was asked, less the margin.
+    hi = time.time() - settings.POLY_LIST_LAG
+    batch, n = [], 0
     try:
-        trades, whole = read_market(cid, since, stop)
+        for page in pages(cid, since, stop):
+            batch += page
+            if len(batch) >= settings.POLY_MARKET_BATCH:
+                lo = min(int(x["timestamp"]) for x in batch) + 1
+                n += _store(cid, batch, lo, hi, False)
+                batch, hi = [], lo
     except venues.VenueError as exc:
         log.warning("trades of %s: %s", cid, exc)
         return None
     except Exception as exc:
         log.warning("trades of %s: %s: %s", cid, type(exc).__name__, exc)
         return None
-    to = asked - settings.POLY_LIST_LAG
-    oldest = min((int(x["timestamp"]) for x in trades), default=None)
-    # What this read covers: [lo, to). The whole list back to `since` covers
-    # from there; a list cut off covers from just after its oldest trade (the
-    # second it stopped in may have more).
-    lo = since if whole else oldest + 1
+    # The last batch reached `since` (or the market's first trade).
+    return n + _store(cid, batch, since, hi, since <= start)
+
+
+def _store(cid, trades, lo, hi, from_start):
     with connection() as conn:
         with conn.cursor() as cur:
             n = write_trades(cur, trades)
-            record(cur, cid, lo, to, whole and since <= float(t[0]["h"]))
-    return n, whole
+            record(cur, cid, lo, hi, from_start)
+    return n
 
 
 def record(cur, cid, lo, hi, from_start):
@@ -179,47 +181,6 @@ def record(cur, cid, lo, hi, from_start):
         WHERE t.condition_id = %(cid)s""", {"cid": cid, "lo": lo, "hi": hi, "start": from_start})
 
 
-def fill_mid(cid, stop=None):
-    """History older than the venue will list trades for: the per-minute
-    order-book midpoint over [history_from, trades_from), stored as candles
-    marked source 'mid' (one price, no volume). Never replaces a candle made
-    from trades. Returns candles written, or None on failure."""
-    t = db.query("""SELECT m.yes_token_id, EXTRACT(EPOCH FROM t.history_from) AS h,
-                           EXTRACT(EPOCH FROM t.trades_from) AS f
-                    FROM poly_tracking t JOIN poly_markets m USING (condition_id)
-                    WHERE t.condition_id = %s""", (cid,))
-    if not t or not t[0]["yes_token_id"]:
-        return None
-    lo, hi = int(t[0]["h"]), int(t[0]["f"])
-    points = []
-    try:
-        for a in range(lo, hi, MID_STEP):
-            points += venues.poly_prices_history(t[0]["yes_token_id"], a, min(hi, a + MID_STEP), stop)
-    except Exception as exc:
-        log.warning("midpoints of %s: %s: %s", cid, type(exc).__name__, exc)
-        return None
-    minutes = {}
-    for ts, p in points:
-        if lo <= ts < hi:
-            minutes[ts // 60 * 60] = p
-    rows = sorted((cid, stamp(m), p, p, p, p) for m, p in minutes.items())
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(store.UNLIMITED_DECOMPRESSION)
-            if rows:
-                execute_values(cur, """
-                    INSERT INTO poly_candles (condition_id, ts, open, high, low, close, source)
-                    SELECT v.c, v.ts::timestamptz, v.o::numeric, v.h::numeric, v.l::numeric,
-                           v.cl::numeric, 'mid'
-                    FROM (VALUES %s) AS v(c, ts, o, h, l, cl)
-                    WHERE EXISTS (SELECT 1 FROM poly_markets m WHERE m.condition_id = v.c)
-                    ON CONFLICT DO NOTHING""", rows, page_size=1000)
-            cur.execute(LOCK, ([cid],))
-            cur.execute("UPDATE poly_tracking SET mid_to = trades_from WHERE condition_id = %s",
-                        (cid,))
-    return len(rows)
-
-
 # ---------------------------------------------------------------------------
 # The feed
 # ---------------------------------------------------------------------------
@@ -232,9 +193,16 @@ def feed_state():
 
 
 def read_feed(since, stop=None):
-    """The feed back to `since` (unix time), newest first, or as far as it
-    goes. Returns (trades, reached)."""
-    return read_list(None, since, settings.POLY_FEED_MOST, stop)
+    """The feed back to `since` (unix time), newest first, but no more than
+    about POLY_FEED_MOST trades. Returns (trades, reached): `reached` is False
+    if it stopped there before getting back to `since`."""
+    out = []
+    for page in pages(None, since, stop):
+        out += page
+        if len(out) >= settings.POLY_FEED_MOST and not (
+                since is not None and int(page[-1]["timestamp"]) < since):
+            return out, False
+    return out, True
 
 
 def poll_feed(stop=None, overlap=30):
@@ -283,9 +251,7 @@ def poll_feed(stop=None, overlap=30):
 # Which markets need reading
 # ---------------------------------------------------------------------------
 
-# (mid_to is NULL for most markets: the COALESCE keeps "not done" from
-# becoming NULL, which NOT would leave NULL and every filter would drop.)
-HISTORY_DONE = "(t.trades_from <= t.history_from OR COALESCE(t.mid_to >= t.trades_from, false))"
+HISTORY_DONE = "(t.trades_from <= t.history_from)"
 # Traded at a time the market's coverage does not reach -- but only judged
 # once the feed has read past that reading, so a market the feed is carrying
 # is never counted while the feed catches up to it.

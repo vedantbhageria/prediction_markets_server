@@ -31,8 +31,7 @@ NET_PROBE_SECONDS = _num("NET_PROBE_SECONDS", 30, float)
 # fails they try it. Empty = always direct. Kalshi is not on the list by
 # default: it answers 403 to WARP's addresses.
 VPN_PROXY = os.environ.get("VPN_PROXY", "").strip()
-VPN_HOSTS = _list("VPN_HOSTS") or ["gamma-api.polymarket.com", "clob.polymarket.com",
-                                   "data-api.polymarket.com"]
+VPN_HOSTS = _list("VPN_HOSTS") or ["gamma-api.polymarket.com", "data-api.polymarket.com"]
 VPN_RETRY_SECONDS = _num("VPN_RETRY_SECONDS", 300, float)
 
 # --- markets store ----------------------------------------------------------
@@ -87,9 +86,9 @@ POLY_MAX_PER_SECOND = _num("POLY_MAX_PER_SECOND", 8, float)
 # an hour and a half); a longer gap is caught up market by market.
 POLY_FEED_SECONDS = _num("POLY_FEED_SECONDS", 15, float)
 POLY_FEED_MOST = _num("POLY_FEED_MOST", 100_000)
-# One market's trades are read back no further than this many in one go
-# (memory); history older than that comes from midpoints (poly.fill_mid).
-POLY_MARKET_MOST = _num("POLY_MARKET_MOST", 200_000)
+# One market's trades are stored this many at a time as they are read, so a
+# market of any size is read whole without holding it all in memory.
+POLY_MARKET_BATCH = _num("POLY_MARKET_BATCH", 50_000)
 # A trade can reach the feed a little after it happened: coverage is claimed
 # only up to this long before each read.
 POLY_FEED_LAG = _num("POLY_FEED_LAG_SECONDS", 30)
@@ -100,5 +99,4 @@ POLY_FEED_LAG = _num("POLY_FEED_LAG_SECONDS", 30)
 POLY_LIST_LAG = _num("POLY_LIST_LAG_SECONDS", 900)
 # Where Polymarket is (the tests point these at a simulated one).
 POLY_GAMMA_URL = os.environ.get("POLY_GAMMA_URL", "").strip() or "https://gamma-api.polymarket.com"
-POLY_CLOB_URL = os.environ.get("POLY_CLOB_URL", "").strip() or "https://clob.polymarket.com"
 POLY_DATA_URL = os.environ.get("POLY_DATA_URL", "").strip() or "https://data-api.polymarket.com"

@@ -75,13 +75,13 @@ WITH d AS (
     FROM x GROUP BY condition_id, minute
 ), written AS (
     INSERT INTO poly_candles AS pc (condition_id, ts, open, high, low, close, volume,
-                                    notional, trades, source)
-    SELECT condition_id, minute, o, h, l, cl, v, n, k, 'trades' FROM c
+                                    notional, trades)
+    SELECT condition_id, minute, o, h, l, cl, v, n, k FROM c
     ORDER BY condition_id, minute
     ON CONFLICT (condition_id, ts) DO UPDATE SET
         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
         close = EXCLUDED.close, volume = EXCLUDED.volume, notional = EXCLUDED.notional,
-        trades = EXCLUDED.trades, source = 'trades'
+        trades = EXCLUDED.trades
     RETURNING 1
 )
 SELECT count(*) FROM written

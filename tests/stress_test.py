@@ -32,7 +32,6 @@ import json
 import os
 import random
 import signal
-import statistics
 import subprocess
 import sys
 import threading

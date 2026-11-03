@@ -30,7 +30,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import db
 import poly
 import ratelimit
 import settings

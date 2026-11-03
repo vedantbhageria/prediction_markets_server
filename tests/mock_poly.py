@@ -2,13 +2,12 @@
 
     python tests/mock_poly.py --port 18400 --start 1793600000 [--scale 1]
 
-One server answers for all three of Polymarket's hosts -- point
-POLY_GAMMA_URL, POLY_CLOB_URL and POLY_DATA_URL at it:
+One server answers for both of Polymarket's hosts we use -- point
+POLY_GAMMA_URL and POLY_DATA_URL at it:
 
     gamma   /events/keyset, /markets          the listing, with volumes
     data    /v2/trades                        the feed, or one market's trades
             (/trades, v1, answers 410 as the real one does since 2 Nov 2026)
-    clob    /prices-history                   per-minute midpoints
 
 Some 2,000 made-up markets trade deterministically from (seed, market,
 minute), so a test can work out every trade -- and every candle -- exactly.
@@ -200,11 +199,6 @@ class Universe:
                 "volume": f"{total:.6f}", "volume24hr": round(day, 6),
                 "liquidity": "1000", "description": f"Resolves on made-up thing #{m['i']}."}
 
-    def midpoints(self, m, lo, hi):
-        return [{"t": minute * 60, "p": self.price(m, minute)}
-                for minute in range(lo // 60, hi // 60 + 1)
-                if lo <= minute * 60 <= hi and minute * 60 >= m["start"]]
-
 
 class Handler(BaseHTTPRequestHandler):
     universe = None
@@ -304,11 +298,6 @@ class Handler(BaseHTTPRequestHandler):
             ids = parse_qs(url.query).get("condition_ids", [])
             return self.send(200, [row for cid in ids if cid in u.by_cid
                                    for row in [u.listing(u.by_cid[cid], now)] if row])
-        if path == "/prices-history":
-            m = next((m for m in u.markets if q.get("market") in (m["yes"], m["no"])), None)
-            if not m:
-                return self.send(200, {"history": []})
-            return self.send(200, {"history": u.midpoints(m, int(q["startTs"]), int(q["endTs"]))})
         return self.send(404, {"error": "not found"})
 
 

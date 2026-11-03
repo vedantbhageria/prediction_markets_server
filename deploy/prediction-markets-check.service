@@ -1,0 +1,28 @@
+# prediction_markets daily data check. Checks the data once a day at 09:00 UTC and pushes the result through ntfy.
+#
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-check
+#   tail -f ~/logs/check.log
+#   sudo systemctl restart prediction-markets-check
+
+[Unit]
+Description=prediction_markets daily data check
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python check.py
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/theonealpha/logs/check.log
+StandardError=append:/home/theonealpha/logs/check.log
+
+[Install]
+WantedBy=multi-user.target

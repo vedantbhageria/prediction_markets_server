@@ -1,0 +1,28 @@
+# prediction_markets similar markets. Records and vectors for the similar-markets search, every 10 minutes.
+#
+# Installed with the others by: sudo bash deploy/install-services.sh
+#   systemctl status prediction-markets-match
+#   tail -f ~/logs/match.log
+#   sudo systemctl restart prediction-markets-match
+
+[Unit]
+Description=prediction_markets similar markets
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+User=theonealpha
+WorkingDirectory=/home/theonealpha/prediction_markets_server
+EnvironmentFile=/home/theonealpha/prediction_markets_server/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/theonealpha/prediction_markets_server/.venv/bin/python match.py
+# SIGINT: each program finishes the request in hand and saves its place.
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/theonealpha/logs/match.log
+StandardError=append:/home/theonealpha/logs/match.log
+
+[Install]
+WantedBy=multi-user.target

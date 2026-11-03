@@ -199,9 +199,6 @@ CREATE INDEX IF NOT EXISTS poly_markets_stated_idx ON poly_markets (stated_date)
 -- One row per market per minute, made by aggregate.py from poly_trades: the
 -- price of the market's first outcome (its yes_token_id -- a trade in the other
 -- outcome at p counts as 1 - p), volume in shares, notional in USDC paid.
--- source 'mid' marks the exception: history older than the 20,000 trades the
--- venue will list for one market, filled from its per-minute order-book
--- midpoint -- one price, no volume.
 CREATE TABLE IF NOT EXISTS poly_candles (
     condition_id  TEXT NOT NULL REFERENCES poly_markets (condition_id) ON DELETE CASCADE,
     ts            TIMESTAMPTZ NOT NULL,
@@ -214,7 +211,19 @@ CREATE TABLE IF NOT EXISTS poly_candles (
 );
 ALTER TABLE poly_candles ADD COLUMN IF NOT EXISTS notional NUMERIC(20, 4);
 ALTER TABLE poly_candles ADD COLUMN IF NOT EXISTS trades INTEGER;
-ALTER TABLE poly_candles ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'trades';
+-- Until 3 Nov 2026 history the v1 API would not list was filled from order-book
+-- midpoints (source 'mid'); v2 lists every trade, so those candles go and the
+-- markets are read again (their trades_from is past history_from, so backfill
+-- picks them up). Compressed chunks are decompressed for the delete.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'poly_candles' AND column_name = 'source') THEN
+        PERFORM set_config('timescaledb.max_tuples_decompressed_per_dml_transaction', '0', true);
+        DELETE FROM poly_candles WHERE source = 'mid';
+        ALTER TABLE poly_candles DROP COLUMN source;
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS poly_candles_ts_idx ON poly_candles (ts);
 
@@ -255,8 +264,6 @@ CREATE TABLE IF NOT EXISTS poly_dirty (
 --   history_from         where its history starts: its own start, or
 --                        BACKFILL_DAYS ago if that is later
 --   trades_from/_to      every trade in [trades_from, trades_to) is stored
---   mid_to               [history_from, mid_to) is covered by midpoints only:
---                        the market has more trades than the venue will list
 --
 -- Live collection does not move trades_to for every market every few seconds:
 -- the feed's own coverage is kept once, in poly_feed, and poly_covered_to()
@@ -268,9 +275,9 @@ CREATE TABLE IF NOT EXISTS poly_tracking (
     moved_at      TIMESTAMPTZ,
     history_from  TIMESTAMPTZ NOT NULL,
     trades_from   TIMESTAMPTZ NOT NULL,
-    trades_to     TIMESTAMPTZ NOT NULL,
-    mid_to        TIMESTAMPTZ
+    trades_to     TIMESTAMPTZ NOT NULL
 ) WITH (fillfactor = 70);
+ALTER TABLE poly_tracking DROP COLUMN IF EXISTS mid_to;
 
 -- The feed of every Polymarket trade, as trades.py has read it: every trade
 -- in [covered_from, covered_to) is stored, whatever its market. One row. When
@@ -314,6 +321,27 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS kalshi_candle_counts AS
     FROM kalshi_candles GROUP BY ticker
 WITH NO DATA;
 CREATE UNIQUE INDEX IF NOT EXISTS kalshi_candle_counts_ticker_idx ON kalshi_candle_counts (ticker);
+CREATE INDEX IF NOT EXISTS kalshi_candle_counts_n_idx ON kalshi_candle_counts (n DESC, ticker);
+CREATE MATERIALIZED VIEW IF NOT EXISTS poly_candle_counts AS
+    SELECT condition_id, count(*) AS n, min(ts) AS first_ts, max(ts) AS last_ts
+    FROM poly_candles GROUP BY condition_id
+WITH NO DATA;
+CREATE UNIQUE INDEX IF NOT EXISTS poly_candle_counts_id_idx ON poly_candle_counts (condition_id);
+CREATE INDEX IF NOT EXISTS poly_candle_counts_n_idx ON poly_candle_counts (n DESC, condition_id);
+
+-- The viewer's manage page sorts every market by one of these, largest or
+-- latest first, a page at a time: each index is in exactly that order, so a
+-- page reads a few hundred rows instead of sorting four million.
+CREATE INDEX IF NOT EXISTS kalshi_markets_volume_sort_idx
+    ON kalshi_markets (volume DESC NULLS LAST, ticker);
+CREATE INDEX IF NOT EXISTS kalshi_markets_close_sort_idx
+    ON kalshi_markets (close_time DESC NULLS LAST, ticker);
+CREATE INDEX IF NOT EXISTS kalshi_markets_open_sort_idx
+    ON kalshi_markets (open_time DESC NULLS LAST, ticker);
+CREATE INDEX IF NOT EXISTS poly_markets_volume_sort_idx
+    ON poly_markets (volume DESC NULLS LAST, condition_id);
+CREATE INDEX IF NOT EXISTS poly_markets_end_sort_idx
+    ON poly_markets (end_date DESC NULLS LAST, condition_id);
 
 -- Every distinct Kalshi market title, for the viewer's related-wording panel.
 -- A price ladder repeats one title across hundreds of markets, so there are a
@@ -471,3 +499,13 @@ BEGIN
         ALTER TABLE kalshi_perp_candles DROP COLUMN IF EXISTS filled;
     END IF;
 END $$;
+
+-- The daily data check (check.py): one row per check per run.
+CREATE TABLE IF NOT EXISTS checks (
+    run_at  TIMESTAMPTZ NOT NULL,
+    name    TEXT NOT NULL,
+    status  TEXT NOT NULL,          -- ok, warn, fail
+    value   TEXT,                   -- one line, for people
+    detail  JSONB,
+    PRIMARY KEY (run_at, name)
+);

@@ -203,10 +203,8 @@ class Worker:
             if got is None:
                 self._finish(job, "failed", f"Polymarket did not answer after {ATTEMPTS} tries")
                 continue
-            if not got[1]:
-                poly.fill_mid(job["ticker"], self.stop)
             db.execute("UPDATE api_jobs SET requests_done = 1 WHERE job_id = %s", (job["job_id"],))
-            self._finish(job, "done", None, got[0])
+            self._finish(job, "done", None, got)
 
     def _run(self, jobs):
         self._run_poly([j for j in jobs if is_poly(j["ticker"])])

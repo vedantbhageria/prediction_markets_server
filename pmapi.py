@@ -140,10 +140,12 @@ class Client:
 
     # -- markets ------------------------------------------------------------
 
-    def markets(self, max_rows=None, **filters):
-        """Markets as a DataFrame. Filters: status (open/closed/active/...),
-        series, event, category, q, tickers, closes_after, closes_before,
-        min_volume, sort (e.g. "-volume", "close_time")."""
+    def markets(self, max_rows=None, limit=None, **filters):
+        """Markets as a DataFrame. Filters: venue (kalshi/poly/all), status
+        (open/closed/active/...), series, event, category, q, tickers,
+        closes_after, closes_before, min_volume, sort (e.g. "-volume",
+        "close_time"). `limit` is the same as `max_rows`."""
+        max_rows = max_rows or limit
         for k in ("closes_after", "closes_before"):
             filters[k] = _time(filters.get(k))
         for k in ("series", "event", "category", "tickers"):
@@ -155,9 +157,10 @@ class Client:
     def market(self, ticker, include_raw=False):
         return self._get(f"/v1/markets/{ticker}", include_raw=include_raw or None).json()
 
-    def events(self, max_rows=None, **filters):
-        """Events as a DataFrame. Filters: series, category, q, status."""
-        return self._pages("/v1/events", "events", max_rows, limit=1000, **filters)[0]
+    def events(self, max_rows=None, limit=None, **filters):
+        """Events as a DataFrame. Filters: venue (kalshi/poly), series,
+        category, q, status. `limit` is the same as `max_rows`."""
+        return self._pages("/v1/events", "events", max_rows or limit, limit=1000, **filters)[0]
 
     def event(self, event_ticker):
         """An event as a dict; its markets under "markets" as a DataFrame."""
@@ -165,9 +168,10 @@ class Client:
         body["markets"] = pd.DataFrame(body["markets"])
         return body
 
-    def series_list(self, max_rows=None, **filters):
-        """Series as a DataFrame. Filters: category, frequency, q."""
-        return self._pages("/v1/series", "series", max_rows, limit=1000, **filters)[0]
+    def series_list(self, max_rows=None, limit=None, **filters):
+        """Series as a DataFrame. Filters: category, frequency, q. `limit` is
+        the same as `max_rows`."""
+        return self._pages("/v1/series", "series", max_rows or limit, limit=1000, **filters)[0]
 
     def series(self, series_ticker):
         body = self._get(f"/v1/series/{series_ticker}").json()
@@ -245,11 +249,11 @@ class Client:
                       gates=gates, format=_WIRE)
         return self._frame(r, "markets")
 
-    def trades(self, condition_id, start=None, end=None, max_rows=None):
+    def trades(self, condition_id, start=None, end=None, max_rows=None, limit=None):
         """Every stored trade of one Polymarket market, oldest first: price in
         the token traded and as the first outcome's price (yes_price), size
         in shares, notional in USDC, the taker's wallet and the transaction."""
-        df = self._pages(f"/v1/markets/{condition_id}/trades", "trades", max_rows,
+        df = self._pages(f"/v1/markets/{condition_id}/trades", "trades", max_rows or limit,
                          start=_time(start), end=_time(end), limit=10_000)[0]
         if "ts" in df.columns:
             df["ts"] = pd.to_datetime(df["ts"], utc=True)
@@ -266,6 +270,10 @@ class Client:
     def hot(self):
         """The markets live collection fetches every minute, busiest first."""
         return self._pages("/v1/hot", "markets")[0]
+
+    def checks(self, runs=1):
+        """The daily data check's newest runs: one row per check, ok/warn/fail."""
+        return self._frame(self._get("/v1/checks", runs=runs), "checks")
 
     def status(self):
         return self._get("/v1/status").json()

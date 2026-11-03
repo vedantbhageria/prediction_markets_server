@@ -65,7 +65,7 @@ def index():
         "GET /v1/markets/{condition_id}/trades",
         "GET /v1/candles", "GET /v1/latest",
         "GET /v1/events", "GET /v1/events/{event}", "GET /v1/series", "GET /v1/series/{series}",
-        "GET /v1/categories", "GET /v1/hot", "GET /v1/status",
+        "GET /v1/categories", "GET /v1/hot", "GET /v1/status", "GET /v1/checks",
         "POST /v1/backfill", "GET /v1/backfill", "GET /v1/backfill/{job_id}"]}
 
 
@@ -245,20 +245,32 @@ def _hot():
     return _hot_cache
 
 
+PROPOSITION = """
+    SELECT kind, subject, entity, comparator, low, high, unit, when_at AS "when", when_kind,
+           template, topic, placeholder FROM propositions WHERE venue = %s AND market_id = %s"""
+
+
+def _proposition(cur, venue, market_id):
+    """The market as the similar-markets search reads it (propositions.py), or
+    None before match.py has made its record."""
+    cur.execute(PROPOSITION, (venue, market_id))
+    row = cur.fetchone()
+    return clean(row) if row else None
+
+
 def _poly_market(cid, include_raw):
     with read() as cur:
         cur.execute(f"""
             SELECT m.*, {candle_reader.POLY_START} AS open_time, e.slug AS event_slug,
                    e.title AS event_title, e.category, e.tags,
-                   t.volume_24h, t.moved_at, t.history_from, t.mid_to,
-                   CASE WHEN t.mid_to >= t.trades_from THEN t.history_from
-                        ELSE t.trades_from END AS fetched_from,
+                   t.volume_24h, t.moved_at, t.history_from, t.trades_from AS fetched_from,
                    poly_covered_to(t.trades_to) AS fetched_to
             FROM poly_markets m
             LEFT JOIN poly_events e USING (event_id)
             LEFT JOIN poly_tracking t USING (condition_id)
             WHERE m.condition_id = %s""", (cid,))
         row = cur.fetchone()
+        proposition = _proposition(cur, "poly", cid) if row else None
     if not row:
         not_found("market", cid)
     r = clean(row)
@@ -279,8 +291,8 @@ def _poly_market(cid, include_raw):
            "event": {"event_ticker": r["event_id"], "slug": r["event_slug"],
                      "title": r["event_title"], "category": r["category"], "tags": r["tags"]},
            "activity": {"volume_24h": r["volume_24h"], "traded_by": r["moved_at"]},
-           "candles": {"from": r["fetched_from"], "to": r["fetched_to"],
-                       "midpoints_until": r["mid_to"] if r["mid_to"] else None}}
+           "candles": {"from": r["fetched_from"], "to": r["fetched_to"]},
+           "proposition": proposition}
     if include_raw:
         out["raw"] = raw
     return json_response(out)
@@ -303,6 +315,7 @@ def market(ticker: str = TICKER,
             LEFT JOIN kalshi_tracking t USING (ticker)
             WHERE m.ticker = %s""", (ticker,))
         row = cur.fetchone()
+        proposition = _proposition(cur, "kalshi", ticker) if row else None
     if not row:
         not_found("market", ticker)
     r = clean(row)
@@ -322,6 +335,7 @@ def market(ticker: str = TICKER,
         "activity": {"score": r["activity_score"], "hot": ticker in _hot()["set"],
                      "volume_measured_at": r["volume_measured_at"]},
         "candles": {"from": r["candles_fetched_from"], "to": r["candles_fetched_to"]},
+        "proposition": proposition,
     })
     if include_raw:
         out["raw"] = raw
@@ -330,22 +344,37 @@ def market(ticker: str = TICKER,
 
 EVENT_COLUMNS = ["event_ticker", "series_ticker", "category", "title", "sub_title",
                  "mutually_exclusive", "strike_period", "market_count", "open_market_count",
-                 "close_time"]
+                 "close_time", "venue"]
 EVENT_COUNTS = """
     LEFT JOIN LATERAL (
         SELECT count(*) AS market_count,
                count(*) FILTER (WHERE m.close_time > now()) AS open_market_count,
                max(m.close_time) AS close_time
         FROM kalshi_markets m WHERE m.event_ticker = e.event_ticker) c ON true"""
+# Polymarket's events in the same columns: the event id is the ticker, tags
+# instead of a series; a market is open until it resolves.
+POLY_EVENT_SELECT = """
+    SELECT e.event_id AS event_ticker, NULL::text AS series_ticker, e.category, e.title,
+           e.slug AS sub_title, NULL::boolean AS mutually_exclusive, NULL::text AS strike_period,
+           c.market_count, c.open_market_count, c.close_time, 'poly' AS venue
+    FROM {source} e
+    LEFT JOIN LATERAL (
+        SELECT count(*) AS market_count,
+               count(*) FILTER (WHERE m.closed IS NOT TRUE) AS open_market_count,
+               max(m.end_date) AS close_time
+        FROM poly_markets m WHERE m.event_id = e.event_id) c ON true"""
 
 
 @router.get("/events", tags=["markets"], summary="Search and filter events")
-def events(series: str | None = Query(None, description="series tickers, comma-separated"),
+def events(venue: Literal["kalshi", "poly"] = Query("kalshi", description="kalshi or poly"),
+           series: str | None = Query(None, description="series tickers, comma-separated"),
            category: str | None = None,
            q: str | None = Query(None, description="words in the title"),
            status: Literal["open", "closed"] | None = Query(
                None, description="open: has a market still open; closed: has none"),
            limit: int = LIMIT, page_token: str | None = TOKEN, format: Format = FORMAT):
+    if venue == "poly":
+        return _poly_events(category, q, status, limit, page_token, format)
     where, params = [], []
     if series:
         where.append("e.series_ticker = ANY(%s)")
@@ -364,7 +393,7 @@ def events(series: str | None = Query(None, description="series tickers, comma-s
         cur.execute(f"""
             SELECT e.event_ticker, e.series_ticker, e.category, e.title, e.sub_title,
                    e.mutually_exclusive, e.strike_period, c.market_count, c.open_market_count,
-                   c.close_time
+                   c.close_time, 'kalshi' AS venue
             FROM (SELECT * FROM kalshi_events e WHERE {' AND '.join(where) or 'true'}
                   ORDER BY e.event_ticker LIMIT %s OFFSET %s) e
             {EVENT_COUNTS}
@@ -373,19 +402,45 @@ def events(series: str | None = Query(None, description="series tickers, comma-s
     return table(rows, EVENT_COLUMNS, format, key="events", next_token=nxt)
 
 
+def _poly_events(category, q, status, limit, page_token, format):
+    where, params = [], []
+    if category:
+        where.append("lower(e.category) = ANY(%s)")
+        params.append([c.lower() for c in _names(category)])
+    if q:
+        where.append("(e.title ILIKE %s OR e.slug ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%"]
+    if status:
+        where.append(("" if status == "open" else "NOT ") + "EXISTS (SELECT 1 FROM poly_markets m"
+                     " WHERE m.event_id = e.event_id AND m.closed IS NOT TRUE)")
+    offset = _offset(page_token)
+    source = (f"(SELECT * FROM poly_events e WHERE {' AND '.join(where) or 'true'}"
+              " ORDER BY e.event_id LIMIT %s OFFSET %s)")
+    with read() as cur:
+        cur.execute(POLY_EVENT_SELECT.format(source=source) + " ORDER BY e.event_id",
+                    params + [limit + 1, offset])
+        rows, nxt = _paged([clean(r) for r in cur.fetchall()], limit, offset)
+    return table(rows, EVENT_COLUMNS, format, key="events", next_token=nxt)
+
+
 @router.get("/events/{event}", tags=["markets"], summary="An event and all its markets")
-def event(event: str = Path(description="an event ticker")):
+def event(event: str = Path(description="a Kalshi event ticker or a Polymarket event id")):
     with read() as cur:
         cur.execute(f"""
             SELECT e.event_ticker, e.series_ticker, e.category, e.title, e.sub_title,
                    e.mutually_exclusive, e.strike_period, c.market_count, c.open_market_count,
-                   c.close_time
+                   c.close_time, 'kalshi' AS venue
             FROM kalshi_events e {EVENT_COUNTS} WHERE e.event_ticker = %s""", (event,))
         row = cur.fetchone()
+        select = MARKET_SELECT + " WHERE m.event_ticker = %s ORDER BY m.strike NULLS LAST, m.ticker"
+        if not row:
+            cur.execute(POLY_EVENT_SELECT.format(source="poly_events") + " WHERE e.event_id = %s",
+                        (event,))
+            row = cur.fetchone()
+            select = POLY_SELECT + " WHERE m.event_id = %s ORDER BY m.strike NULLS LAST, ticker"
         if not row:
             not_found("event", event)
-        cur.execute(f"{MARKET_SELECT} WHERE m.event_ticker = %s ORDER BY m.strike NULLS LAST,"
-                    " m.ticker", (event,))
+        cur.execute(select, (event,))
         markets = [clean(r) for r in cur.fetchall()]
     return json_response({**clean(row), "markets": markets})
 
@@ -704,6 +759,24 @@ def hot(limit: int = Query(config.MAX_ROWS, ge=1, le=100_000), format: Format = 
     return table(rows, ["ticker", "title", "category", "activity_score", "volume", "close_time"],
                  format, key="markets",
                  meta={"at": iso(data["at"]), "count": len(data["tickers"]), "cap": data["cap"]})
+
+
+@router.get("/checks", tags=["collection"], summary="The daily data check's newest runs")
+def checks(runs: int = Query(1, ge=1, le=60, description="how many daily runs, newest first"),
+           format: Format = FORMAT):
+    """One row per check per run (check.py): ok, warn or fail, a one-line
+    value and the detail behind it."""
+    with read() as cur:
+        cur.execute("""
+            SELECT run_at, name, status, value, detail FROM checks
+            WHERE run_at IN (SELECT DISTINCT run_at FROM checks ORDER BY run_at DESC LIMIT %s)
+            ORDER BY run_at DESC,
+                     CASE status WHEN 'fail' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, name""", (runs,))
+        rows = [clean(r) for r in cur.fetchall()]
+    if format != "json":                # one text column; the details differ per check
+        for r in rows:
+            r["detail"] = json.dumps(r["detail"])
+    return table(rows, ["run_at", "name", "status", "value", "detail"], format, key="checks")
 
 
 @router.get("/status", tags=["collection"], summary="Is collection keeping up?")

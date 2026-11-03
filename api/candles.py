@@ -22,9 +22,8 @@ The last bucket may still be in progress, as with any exchange's candles.
 
 Polymarket markets -- named by condition id, 0x... -- are read the same way
 from poly_candles, which aggregate.py makes from every trade. Their coverage
-is poly_tracking's [trades_from, poly_covered_to(trades_to)), starting at
-history_from where midpoints fill the oldest part. They have no open
-interest; a midpoint candle has no volume.
+is poly_tracking's [trades_from, poly_covered_to(trades_to)). They have no
+open interest.
 """
 
 import time
@@ -88,8 +87,7 @@ def market_info(cur, tickers):
     if polys:
         cur.execute(f"""
             SELECT m.condition_id AS ticker, {POLY_START} AS open_time, {POLY_CLOSE} AS close_time,
-                   CASE WHEN t.mid_to >= t.trades_from THEN t.history_from
-                        ELSE t.trades_from END AS fetched_from,
+                   t.trades_from AS fetched_from,
                    poly_covered_to(t.trades_to) AS fetched_to
             FROM poly_markets m LEFT JOIN poly_tracking t USING (condition_id)
             WHERE m.condition_id = ANY(%s)""", (polys,))

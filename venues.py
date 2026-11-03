@@ -21,13 +21,11 @@ log = logging.getLogger("venues")
 
 KALSHI = settings.KALSHI_API_URL
 GAMMA = settings.POLY_GAMMA_URL
-CLOB = settings.POLY_CLOB_URL
 DATA = settings.POLY_DATA_URL
-POLY_HOSTS = (GAMMA, CLOB, DATA)
+POLY_HOSTS = (GAMMA, DATA)
 
 KALSHI_BATCH = 100      # tickers per /markets or /markets/candlesticks request
 KALSHI_MAX_CANDLES = 10_000     # market-minutes one candlesticks request may ask for
-POLY_BATCH = 400        # tokens per /midpoints request; the API rejects ~1000
 # Trade lists (data API v2) come a page of at most this many at a time,
 # followed by cursor however far back they go.
 POLY_PAGE = 1000
@@ -242,6 +240,7 @@ def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None)
             response = session(via).request(method, url, params=params, json=body,
                                             timeout=timeout)
             status = response.status_code
+            _notice(url, response.headers)
             if status < 400:
                 return response.json()
             if status == 429 and venue:
@@ -267,6 +266,19 @@ def call(method, url, params=None, body=None, timeout=10, attempts=1, stop=None)
         if attempt >= attempts:
             raise VenueError(f"{url}: HTTP {status}, gave up", status)
         time.sleep(min(2 ** (attempt - 1), 30))
+
+
+_noticed = set()
+
+
+def _notice(url, headers):
+    """A venue's warning that an endpoint is going away, logged once per
+    endpoint (check.py looks for these)."""
+    found = {k: headers[k] for k in ("Deprecation", "Sunset", "Warning") if headers.get(k)}
+    path = url.split("?")[0]
+    if found and path not in _noticed:
+        _noticed.add(path)
+        log.warning("%s: deprecation notice from the venue: %s", path, found)
 
 
 def _chunks(items, size):
@@ -354,20 +366,6 @@ def kalshi_series():
 # Polymarket
 # ---------------------------------------------------------------------------
 
-def poly_midpoints(tokens):
-    """{token id: mid}. Tokens with an empty book are simply absent."""
-    def one(batch):
-        return call("POST", CLOB + "/midpoints",
-                    body=[{"token_id": token} for token in batch], attempts=2)
-    out = {}
-    for page in _pool.map(one, _chunks(list(tokens), POLY_BATCH)):
-        for token, mid in (page or {}).items():
-            value = _f(mid)
-            if value is not None:
-                out[token] = value
-    return out
-
-
 def poly_events(closed=False, end_date_min=None, cursor=None):
     """Pages of events with their markets nested, as (events, next_cursor).
 
@@ -428,13 +426,3 @@ def poly_trades(market=None, cursor=None, stop=None):
                 stop=stop) or {}
     trades = [{k: t.get(k) for k in TRADE_FIELDS} for t in data.get("data") or []]
     return trades, (data.get("pagination") or {}).get("next_cursor") or None
-
-
-def poly_prices_history(token, start, end, stop=None):
-    """[(unix time, price)] for one token over [start, end], one point a
-    minute: the order book's midpoint, sampled -- not a trade price."""
-    data = call("GET", CLOB + "/prices-history",
-                params={"market": token, "startTs": int(start), "endTs": int(end), "fidelity": 1},
-                timeout=60, attempts=4, stop=stop) or {}
-    return [(int(p["t"]), float(p["p"])) for p in data.get("history") or []
-            if p.get("t") is not None and p.get("p") is not None]

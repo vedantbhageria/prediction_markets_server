@@ -10,7 +10,7 @@ import json
 import math
 import re
 import sys
-import bisect
+
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,10 +19,10 @@ from zoneinfo import ZoneInfo
 
 from urllib.parse import quote, urlencode
 
-import requests
+
 from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request)
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import RealDictCursor
 
 import db
 import monitor
@@ -75,6 +75,13 @@ def require_login():
 
 # Polymarket keys on condition_id where Kalshi keys on ticker.
 POLY = {"poly_events", "poly_markets", "poly_candles"}
+
+# The same links at the top of every page.
+NAV_LINKS = [("tables", "/table/kalshi_markets?dim=category"), ("visualise", "/visualise"),
+             ("stats", "/stats"), ("status", "/status"), ("manage", "/manage"), ("docs", "/docs")]
+app.jinja_env.globals["NAV"] = (
+    '<span class="links">'
+    + " ".join(f'<a href="{href}">{label}</a>' for label, href in NAV_LINKS) + "</span>")
 
 
 @lru_cache(maxsize=None)
@@ -235,12 +242,7 @@ PAGE = """
 
 <header>
   <h2><a href="/" style="text-decoration:none;color:inherit">prediction_markets</a></h2>
-  <span class="links">
-    <a href="/status"><b>status</b></a>
-    <a href="/visualise">visualise</a>
-    <a href="/stats">stats</a>
-    <a href="/manage">manage</a>
-  </span>
+  {{ NAV|safe }}
   <span class="toggles">
     <button type="button" onclick="panel('filters')">filters</button>
     {% if near %}<button type="button" onclick="panel('nearby')">nearby</button>{% else
@@ -740,10 +742,8 @@ STATS_PAGE = """
 </style>
 
 <header>
-  <h2><a href="/">prediction_markets</a></h2>
-  <span class="links">
-    <a href="/table/kalshi_markets?dim=category">tables</a>
-  </span>
+  <h2><a href="/">prediction_markets</a> &middot; stats</h2>
+  {{ NAV|safe }}
 </header>
 
 <div class="two">
@@ -920,11 +920,8 @@ MANAGE_PAGE = """
 </style>
 
 <header>
-  <h2><a href="/">prediction_markets</a></h2>
-  <span class="links">
-    <a href="/table/kalshi_markets?dim=category">tables</a>
-    <a href="/stats">stats</a>
-  </span>
+  <h2><a href="/">prediction_markets</a> &middot; manage</h2>
+  {{ NAV|safe }}
 </header>
 
 {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
@@ -1144,10 +1141,11 @@ HOME_PAGE = """
  .note { background: #f7f7f7; border-left: 3px solid #bbb; padding: 10px 14px;
          font-size: 13px; margin: 14px 0; }
  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+ .sub .links a { margin-left: 10px; font-size: 13px; }
 </style>
 
 <h1>prediction_markets</h1>
-<div class="sub">Kalshi and Polymarket, same database, side by side.</div>
+<div class="sub">Kalshi and Polymarket, same database, side by side. &nbsp;{{ NAV|safe }}</div>
 
 <div class="grid">
   <a class="card k" href="/table/kalshi_markets?dim=category">
@@ -1164,12 +1162,14 @@ HOME_PAGE = """
       <b>{{ '{:,}'.format(counts.poly_events) }}</b> events &middot;
       <b>{{ '{:,}'.format(counts.poly_candles) }}</b> candles</div>
   </a>
+  {% if counts.kalshi_perp_markets %}
   <a class="card k" href="/table/kalshi_perp_markets?dim=status">
     <h3>Kalshi perpetuals</h3>
     <p>Leveraged up/down contracts. No expiry, funding every 8 hours.</p>
     <div class="rows"><b>{{ '{:,}'.format(counts.kalshi_perp_markets) }}</b> instruments &middot;
       <b>{{ '{:,}'.format(counts.kalshi_perp_candles) }}</b> candles</div>
   </a>
+  {% endif %}
   <a class="card" href="/visualise">
     <h3>Visualise</h3>
     <p>Candlestick chart for any market whose candles are downloaded,
@@ -1188,7 +1188,12 @@ HOME_PAGE = """
   <a class="card" href="/status">
     <h3>Status</h3>
     <p>Everything happening now, in one place: live ingestion, the backfill,
-       the Kalshi budget, the database and the API.</p>
+       both venues' budgets, Polymarket's trade feed, the database and the API.</p>
+  </a>
+  <a class="card" href="/docs">
+    <h3>Docs</h3>
+    <p>How it all works and why: the architecture, every decision, and the
+       API with examples.</p>
   </a>
   <a class="card" href="/table/kalshi_candles?dim=category">
     <h3>Candles</h3>
@@ -1213,9 +1218,9 @@ HOME_PAGE = """
       <td colspan="2">Both quote 0&ndash;1, and that number is the implied probability.
         43&cent; means the market thinks 43%.</td></tr>
   <tr><td>Candles</td>
-      <td>Real OHLCV, with volume and open interest per bar.</td>
-      <td>One forward-filled price point per minute. Open, high, low and close
-          are the same number and volume is always empty.</td></tr>
+      <td>Real OHLCV, with volume and open interest per bar, from Kalshi.</td>
+      <td>Real OHLCV made here from every trade (Polymarket has no candle API):
+          volume in shares, notional in USDC, and the trade count per bar.</td></tr>
 </table>
 
 <h2>Why the expiry dates never line up</h2>
@@ -1254,83 +1259,91 @@ everything without a strike. Both are in the nearby panel on a market's page.</p
 """
 
 
+# The column each venue's markets are sorted by, newest or largest first. Each
+# has an index in that order (schema.sql), so a page of /manage reads a few
+# hundred rows of it rather than sorting all four million markets.
+MANAGE_SORTS = {"volume": ("m.volume", "p.volume"),
+                "close": ("m.close_time", "p.end_date"),
+                "open": ("m.open_time", None)}
+MANAGE_KALSHI = """
+    SELECT 'kalshi' AS venue, m.ticker AS id, m.title, e.category,
+           m.close_time > now() AS active,
+           to_char(m.open_time, 'YYYY-MM-DD HH24:MI') AS opened,
+           to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
+           m.volume, c.n AS candles, to_char(c.first_ts, 'YYYY-MM-DD HH24:MI') AS first,
+           to_char(c.last_ts, 'YYYY-MM-DD HH24:MI') AS last, {key} AS k
+    FROM {source}
+    JOIN kalshi_events e USING (event_ticker)
+    WHERE {where} ORDER BY {key} DESC NULLS LAST, m.ticker LIMIT %s"""
+MANAGE_POLY = """
+    SELECT 'poly' AS venue, p.condition_id AS id, p.question AS title, e.category,
+           p.closed IS NOT TRUE AS active, NULL AS opened,
+           to_char(p.end_date, 'YYYY-MM-DD HH24:MI') AS closes,
+           p.volume, c.n AS candles, to_char(c.first_ts, 'YYYY-MM-DD HH24:MI') AS first,
+           to_char(c.last_ts, 'YYYY-MM-DD HH24:MI') AS last, {key} AS k
+    FROM {source}
+    LEFT JOIN poly_events e USING (event_id)
+    WHERE {where} ORDER BY {key} DESC NULLS LAST, p.condition_id LIMIT %s"""
+
+
 def _manage_rows(venue, state, category, sort, q, limit, offset=0):
-    """One row per market, with its candle coverage."""
+    """One page of markets, with their candle coverage.
+
+    Each venue gives its best offset + limit rows in the page's order, walking
+    an index; the page is the merge of the two. Sorted by candles, the markets
+    with candles come from the counts views (indexed by count) and those
+    without after them, in id order."""
     counts_ready()
-    order = {"candles": "candles DESC NULLS LAST", "volume": "volume DESC NULLS LAST",
-             "close": "closes DESC NULLS LAST", "open": "opened DESC NULLS LAST"}[sort]
     like = f"%{q}%" if q else None
+    n = offset + limit
+    parts = []
 
-    parts, args = [], []
-    if venue in ("both", "kalshi"):
-        cond, a = ["true"], []
+    def part(template, source, key, cond, args):
+        parts.append((template.format(source=source, key=key, where=" AND ".join(cond)),
+                      args + [n]))
+
+    for v, template, key_col, title, cid, counts, closed in (
+            ("kalshi", MANAGE_KALSHI, "m.ticker", "m.title", "m.ticker", "kalshi_candle_counts",
+             "m.close_time <= now()"),
+            ("poly", MANAGE_POLY, "p.condition_id", "p.question", "p.condition_id",
+             "poly_candle_counts", "p.closed IS TRUE")):
+        if venue not in ("both", v):
+            continue
+        markets = "kalshi_markets m" if v == "kalshi" else "poly_markets p"
+        join = "c.ticker = m.ticker" if v == "kalshi" else "c.condition_id = p.condition_id"
+        cond, args = ["true"], []
         if category:
-            cond.append("e.category = %s"); a.append(category)
+            cond.append("e.category = %s"); args.append(category)
         if q:
-            cond.append("(m.ticker ILIKE %s OR m.title ILIKE %s)"); a += [like, like]
+            cond.append(f"({cid} ILIKE %s OR {title} ILIKE %s)"); args += [like, like]
         if state == "active":
-            cond.append("m.close_time > now()")
+            cond.append(f"NOT ({closed})")
         elif state == "expired":
-            cond.append("m.close_time <= now()")
-        parts.append(("""
-            SELECT 'kalshi' AS venue, m.ticker AS id, m.title, e.category,
-                   m.close_time > now() AS active,
-                   to_char(m.open_time, 'YYYY-MM-DD HH24:MI') AS opened,
-                   to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes,
-                   m.volume,
-                   c.n AS candles, to_char(c.first_ts, 'YYYY-MM-DD HH24:MI') AS first,
-                   to_char(c.last_ts, 'YYYY-MM-DD HH24:MI') AS last
-            FROM kalshi_markets m
-            JOIN kalshi_events e USING (event_ticker)
-            LEFT JOIN kalshi_candle_counts c ON c.ticker = m.ticker
-            WHERE """ + " AND ".join(cond), a))
+            cond.append(closed)
+        with_counts = f"{counts} c JOIN {markets} ON {join}"
+        without = f"{markets} LEFT JOIN {counts} c ON {join}"
+        if sort == "candles":
+            if state != "nodata":
+                part(template, with_counts, "c.n", cond, args)
+            if state != "withdata":
+                part(template, without, "NULL::bigint", cond + ["c.n IS NULL"], args)
+            continue
+        key = MANAGE_SORTS[sort][0 if v == "kalshi" else 1] or "NULL::numeric"
+        extra = {"withdata": ["c.n IS NOT NULL"], "nodata": ["c.n IS NULL"]}.get(state, [])
+        part(template, without, key, cond + extra, args)
 
-    if venue in ("both", "poly"):
-        cond, a = ["true"], []
-        if category:
-            cond.append("e.category = %s"); a.append(category)
-        if q:
-            cond.append("(p.condition_id ILIKE %s OR p.question ILIKE %s)"); a += [like, like]
-        if state == "active":
-            cond.append("p.end_date > now()")
-        elif state == "expired":
-            cond.append("p.end_date <= now()")
-        parts.append(("""
-            SELECT 'poly' AS venue, p.condition_id AS id, p.question AS title, e.category,
-                   p.end_date > now() AS active,
-                   NULL AS opened,
-                   to_char(p.end_date, 'YYYY-MM-DD HH24:MI') AS closes,
-                   p.volume,
-                   c.n AS candles, c.lo AS first, c.hi AS last
-            FROM poly_markets p
-            LEFT JOIN poly_events e USING (event_id)
-            LEFT JOIN (SELECT condition_id, count(*) n,
-                              to_char(min(ts),'YYYY-MM-DD HH24:MI') lo,
-                              to_char(max(ts),'YYYY-MM-DD HH24:MI') hi
-                       FROM poly_candles GROUP BY condition_id) c
-              ON c.condition_id = p.condition_id
-            WHERE """ + " AND ".join(cond), a))
-
-    sql = " UNION ALL ".join(f"({s})" for s, _ in parts)
-    for _, a in parts:
-        args += a
-    having = ""
-    if state == "withdata":
-        having = " WHERE candles IS NOT NULL"
-    elif state == "nodata":
-        having = " WHERE candles IS NULL"
+    if not parts:
+        return []
+    order = {"candles": "candles DESC NULLS LAST", "volume": "volume DESC NULLS LAST",
+             "close": "k DESC NULLS LAST", "open": "k DESC NULLS LAST"}[sort]
     # A stable tiebreak keeps paging from repeating or skipping rows when the
     # sort column has ties (it usually does -- volume 0, no candles).
-    order += ", id"
-    if limit is None:
-        rows = db.query(f"SELECT * FROM ({sql}) x{having} ORDER BY {order}", tuple(args))
-    else:
-        args += [limit, offset]
-        rows = db.query(f"SELECT * FROM ({sql}) x{having} ORDER BY {order}"
-                        " LIMIT %s OFFSET %s", tuple(args))
+    sql = (" UNION ALL ".join(f"({s})" for s, _ in parts)
+           + f" ORDER BY {order}, id LIMIT %s OFFSET %s")
+    rows = db.query(sql, tuple(a for _, args in parts for a in args) + (limit, offset))
     # Kalshi's short outcome name lives in the stored listing; read it only for
     # the rows shown, not for every market the query sorted.
-    ids = [r["id"] for r in rows if r["venue"] == "kalshi"][:5000]
+    ids = [r["id"] for r in rows if r["venue"] == "kalshi"]
     if ids:
         names = {r["ticker"]: r["sub"] for r in db.query(
             "SELECT ticker, raw->>'yes_sub_title' AS sub FROM kalshi_markets"
@@ -1339,6 +1352,19 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
             if r["venue"] == "kalshi" and names.get(r["id"]):
                 r["title"] = names[r["id"]]
     return rows
+
+
+def _manage_summary():
+    return db.query("""
+        SELECT (SELECT count(*) FROM kalshi_markets) k_markets,
+               (SELECT count(*) FROM kalshi_candle_counts) k_with,
+               (SELECT count(*) FROM poly_markets) p_markets,
+               (SELECT count(*) FROM poly_candle_counts) p_with,
+               (SELECT count(*) FROM kalshi_markets WHERE close_time > now())
+             + (SELECT count(*) FROM poly_markets WHERE closed IS NOT TRUE) active,
+               (SELECT count(*) FROM kalshi_markets WHERE close_time <= now())
+             + (SELECT count(*) FROM poly_markets WHERE closed IS TRUE) expired,
+               pg_size_pretty(pg_database_size(current_database())) size""")[0]
 
 
 @app.route("/manage")
@@ -1358,16 +1384,7 @@ def manage():
             limit = 300
 
     counts_ready()
-    s = _cached(("manage summary",), 120, lambda: db.query("""
-        SELECT (SELECT count(*) FROM kalshi_markets) k_markets,
-               (SELECT count(*) FROM kalshi_candle_counts) k_with,
-               (SELECT count(*) FROM poly_markets) p_markets,
-               (SELECT count(DISTINCT condition_id) FROM poly_candles) p_with,
-               (SELECT count(*) FROM kalshi_markets WHERE close_time > now())
-             + (SELECT count(*) FROM poly_markets WHERE end_date > now()) active,
-               (SELECT count(*) FROM kalshi_markets WHERE close_time <= now())
-             + (SELECT count(*) FROM poly_markets WHERE end_date <= now()) expired,
-               pg_size_pretty(pg_database_size(current_database())) size""")[0])
+    s = _cached(("manage summary",), 900, _manage_summary)
 
     categories = _cached(("manage categories",), 600, lambda: [r["c"] for r in db.query("""
         SELECT DISTINCT category AS c FROM kalshi_events WHERE category IS NOT NULL
@@ -1579,17 +1596,16 @@ STATUS_PAGE = """
  th:first-child, td:first-child, td.l, th.l { text-align: left; }
  th { color: #666; font-weight: normal; font-size: 12px; }
  td.wrap { white-space: normal; word-break: break-all; text-align: left; }
+ .chk { display: inline-block; min-width: 34px; text-align: center; border-radius: 8px;
+        font-size: 11px; padding: 1px 6px; font-weight: 700; }
+ .chk-ok { background: #e6f6e6; color: #262; } .chk-warn { background: #fff4d6; color: #8a5a00; }
+ .chk-fail { background: #fde2e1; color: #a12; }
  @media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
 </style>
 
 <header>
   <h2><a href="/">prediction_markets</a> &middot; status</h2>
-  <span class="links">
-    <a href="/table/kalshi_markets?dim=category">tables</a>
-    <a href="/visualise">visualise</a>
-    <a href="/stats">stats</a>
-    <a href="/manage">manage</a>
-  </span>
+  {{ NAV|safe }}
 </header>
 <div class="bar-nav">
   window:
@@ -1599,7 +1615,7 @@ STATUS_PAGE = """
   {% else %}paused &middot; <a href="?window={{ window }}">resume</a>{% endif %}
   &middot; <span class="muted">as of {{ now }}</span>
 </div>
-<div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#poly">Polymarket</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
+<div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#poly">Polymarket</a><a href="#check">daily check</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
 
 <div class="tiles">
   <div class="tile {{ 'bad' if c.down else 'good' }}"><b>{{ 'down' if c.down else 'up' }}</b>
@@ -1669,7 +1685,7 @@ STATUS_PAGE = """
   <div class="tile {{ 'bad' if p.down else 'good' }}"><b>{{ 'down' if p.down else 'up' }}</b>
     <span>Polymarket &middot; {{ 'through the VPN' if p.route == 'vpn' else 'direct' }}</span></div>
   <div class="tile {{ 'good' if p.behind is not none and p.behind < 600 else 'warn' if p.behind is not none and p.behind < 1800 else 'bad' if p.behind is not none else '' }}">
-    <b>{{ (p.behind|string + ' s') if p.behind is not none else '—' }}</b><span>trade feed behind the clock &middot; the venue itself runs 2–6 min behind</span></div>
+    <b>{{ (p.behind|string + ' s') if p.behind is not none else '—' }}</b><span>trade feed behind the clock &middot; claimed 30 s behind its newest trade</span></div>
   <div class="tile"><b>{{ '{:,}'.format(p.recent) if p.recent is not none else '—' }}</b><span>trades stored in the last 5 min</span></div>
   <div class="tile {{ 'warn' if p.behind_markets else '' }}"><b>{{ '{:,}'.format(p.behind_markets) if p.behind_markets is not none else '—' }}</b><span>markets to catch up after a gap</span></div>
   <div class="tile {{ 'warn' if p.waiting and p.waiting > 5000 else '' }}"><b>{{ '{:,}'.format(p.waiting) if p.waiting is not none else '—' }}</b><span>minutes waiting for their candle</span></div>
@@ -1680,8 +1696,21 @@ STATUS_PAGE = """
   <div class="big">{{ '%.1f'|format(p.pct) }}% <span style="font-size:14px;font-weight:normal;color:#666">of Polymarket markets have their history</span></div>
   <div class="progress"><div style="width:{{ p.pct }}%"></div></div>
   <div class="muted" style="font-size:13px;margin-top:6px">{{ '{:,}'.format(p.left) }} markets left, about one request each &middot;
-    {{ '{:,}'.format(p.mid) }} partly from midpoints &middot; {{ p.trades }} trades stored</div>
+    {{ p.trades }} trades stored</div>
   {% else %}<span class="muted">no Polymarket markets tracked yet: discovery adds them on its next pass</span>{% endif %}
+</div>
+
+<h3 class="section" id="check">Daily check <small>check.py, every day at 09:00 UTC: is yesterday's data right, complete and current?</small></h3>
+<div class="col scroll">
+  {% if checks %}
+  <div class="muted" style="font-size:13px;margin-bottom:6px">last run {{ when(checks[0].run_at) }} &middot; pushed to your phone through ntfy</div>
+  <table>
+    {% for r in checks %}
+    <tr><td><span class="chk chk-{{ r.status }}">{{ r.status }}</span></td><td>{{ r.name }}</td>
+        <td class="wrap" style="word-break:normal">{{ r.value }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<span class="muted">no run yet: the first is at 09:00 UTC (or run <code>python check.py --now</code>)</span>{% endif %}
 </div>
 
 <h3 class="section" id="discovery">Discovery and scoring <small>discover.py lists every market; activity.py scores each scan</small></h3>
@@ -1978,13 +2007,12 @@ def _poly():
             c = db.query(f"""
                 SELECT count(*) AS tracked,
                        count(*) FILTER (WHERE {poly.HISTORY_DONE}) AS done,
-                       count(*) FILTER (WHERE t.mid_to IS NOT NULL) AS mid,
                        count(*) FILTER (WHERE {poly.HISTORY_DONE} AND {poly.BEHIND}) AS behind
                 FROM poly_tracking t""")[0]
             c["trades"] = _count(db.query("SELECT approximate_row_count('poly_trades') AS n")[0]["n"])
             return c
         c = _cached(("poly counts",), 120, counts)
-        out.update(tracked=c["tracked"], left=c["tracked"] - c["done"], mid=c["mid"],
+        out.update(tracked=c["tracked"], left=c["tracked"] - c["done"],
                    behind_markets=c["behind"], trades=c["trades"],
                    pct=100 * c["done"] / c["tracked"] if c["tracked"] else 0)
     except Exception:
@@ -1992,21 +2020,32 @@ def _poly():
     return out
 
 
+def _checks():
+    """The newest daily check, failures first (none before the first run)."""
+    try:
+        return db.query("SELECT run_at, name, status, value FROM checks"
+                        " WHERE run_at = (SELECT max(run_at) FROM checks)"
+                        " ORDER BY CASE status WHEN 'fail' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, name")
+    except Exception:
+        return []
+
+
 def _database():
     """Sizes and counts, from the database's own bookkeeping: instant."""
     def compute():
         sizes = db.query("""
-            SELECT 'candles' AS name, hypertable_size('kalshi_candles') AS b
+            SELECT 'kalshi_candles' AS name, hypertable_size('kalshi_candles') AS b
             UNION ALL
             SELECT relname, pg_total_relation_size(c.oid) FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE n.nspname = 'public' AND c.relname IN ('kalshi_markets', 'kalshi_tracking',
                   'kalshi_events', 'kalshi_titles', 'api_requests', 'kalshi_candle_counts',
-                  'poly_markets', 'poly_tracking')
+                  'poly_markets', 'poly_tracking', 'poly_events', 'poly_candle_counts',
+                  'propositions', 'templates')
             UNION ALL
-            SELECT 'poly trades', hypertable_size('poly_trades')
+            SELECT 'poly_trades', hypertable_size('poly_trades')
             UNION ALL
-            SELECT 'poly candles', hypertable_size('poly_candles')""")
+            SELECT 'poly_candles', hypertable_size('poly_candles')""")
         sizes.sort(key=lambda r: -(r["b"] or 0))
         top = max([r["b"] or 0 for r in sizes] or [1]) or 1
         markets = db.query("SELECT GREATEST(reltuples, 0)::bigint AS n FROM pg_class"
@@ -2015,7 +2054,7 @@ def _database():
         return {"size": _size(db.query("SELECT pg_database_size(current_database()) AS n")[0]["n"]),
                 "candles": _count(db.query("SELECT approximate_row_count('kalshi_candles') AS n")[0]["n"]),
                 "markets": _count(markets), "open": _count(open_now),
-                "tables": [{"name": r["name"].replace("kalshi_", ""), "size": _size(r["b"]),
+                "tables": [{"name": r["name"].replace("_", " "), "size": _size(r["b"]),
                             "pct": round(100 * (r["b"] or 0) / top)} for r in sizes]}
     d = dict(_cached(("database",), 120, compute))
     d["connections"] = db.query("SELECT count(*) AS n FROM pg_stat_activity"
@@ -2111,7 +2150,7 @@ def status_page():
                 bucket_label=bucket_label, now=datetime.now(USAGE_TZ).strftime("%H:%M:%S"),
                 ms=_ms, size=_size, when=_when, c=_collection(), d=_database(), p=_poly(),
                 missing=False,
-                m=charts, bf=bf, scans=scans,
+                m=charts, bf=bf, scans=scans, checks=_checks(),
                 first_label=_when(datetime.fromtimestamp(starts[0], timezone.utc)))
     if not api_table:
         return render_template_string(STATUS_PAGE, **page, missing=True)
@@ -2209,23 +2248,28 @@ def _cached(key, ttl, compute):
 
 def keep_fresh(stop):
     """The slow numbers, worked out every 10 minutes in the background so no
-    page waits for them: the stats page, and each market's candle count."""
+    page waits for them: each market's candle count, the stats page, the
+    manage page's totals and the visualise picker."""
     while not stop.is_set():
         try:
             with connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT ispopulated FROM pg_matviews"
-                                " WHERE matviewname = 'kalshi_candle_counts'")
-                    populated = cur.fetchone()
-                    if populated is not None:
-                        cur.execute("REFRESH MATERIALIZED VIEW"
-                                    + (" CONCURRENTLY" if populated[0] else "")
-                                    + " kalshi_candle_counts")
-            with _cache_lock:
-                _cache[("stats",)] = (time.monotonic(), _stats_data())
+                    refresh_counts(cur)
+            for key, compute in ((("stats",), _stats_data), (("manage summary",), _manage_summary),
+                                 (("plottable",), _plottable)):
+                value = compute()
+                with _cache_lock:
+                    _cache[key] = (time.monotonic(), value)
         except Exception as exc:
             print(f"background refresh failed: {type(exc).__name__}: {exc}", flush=True)
         stop.wait(600)
+
+
+@app.route("/docs")
+def docs():
+    """The architecture and API document (docs/architecture.html), as it is."""
+    return Response((paths.ROOT / "docs" / "architecture.html").read_text(encoding="utf-8"),
+                    mimetype="text/html")
 
 
 @app.route("/stats")
@@ -2606,74 +2650,47 @@ def _near_result(a, same_category, by, hours, points):
 
 
 def fetch_candles(name, ident):
-    """Download one market's candles now and store them.
+    """Download one market's history now and store it: Kalshi's candles, or
+    Polymarket's trades (aggregate.py makes their candles). Returns (how many
+    were new, a problem or None).
 
     Runs from the market's own start to its close, or now if it is still open.
     """
-    session = requests.Session()
     now = int(datetime.now(timezone.utc).timestamp())
 
     if name in POLY:
-        found = db.query("SELECT yes_token_id, end_date,"
-                         " raw->>'startDate' AS start_date"
-                         " FROM poly_markets WHERE condition_id = %s", (ident,))
-        if not found or not found[0]["yes_token_id"]:
-            return 0, "no token id stored for this market"
-        row = found[0]
-        hi = min(int(row["end_date"].timestamp()), now) if row["end_date"] else now
-        lo = hi - 30 * 86400
-        if row["start_date"]:
-            try:
-                lo = int(datetime.fromisoformat(
-                    row["start_date"].replace("Z", "+00:00")).timestamp())
-            except ValueError:
-                pass
-        if hi <= lo:
-            return 0, "market has not started trading yet"
+        # Its whole trade list, as backfill and the API read it; aggregate.py
+        # makes the candles from the trades.
+        if not db.query("SELECT 1 FROM poly_tracking WHERE condition_id = %s", (ident,)):
+            return 0, "market not tracked yet: discovery adds it on its next pass"
+        h = db.query("SELECT EXTRACT(EPOCH FROM history_from) AS h FROM poly_tracking"
+                     " WHERE condition_id = %s", (ident,))[0]["h"]
+        got = poly.fetch_market(ident, since=float(h) - 60)
+        if got is None:
+            return 0, "Polymarket did not answer; try again"
+        return got, None if got else "no new trades: everything listed is already stored"
 
-        data = session.get("https://clob.polymarket.com/prices-history",
-                           params={"market": row["yes_token_id"],
-                                   "startTs": lo, "endTs": hi, "fidelity": 1},
-                           timeout=60).json()
-        buckets = {}
-        for point in data.get("history") or []:
-            buckets.setdefault(point["t"] - point["t"] % 60, []).append(float(point["p"]))
-        rows = [(ident, datetime.fromtimestamp(m, timezone.utc),
-                 pts[0], max(pts), min(pts), pts[-1], None)
-                for m, pts in sorted(buckets.items())]
-        table = "poly_candles"
-        cols = ("condition_id", "ts", "open", "high", "low", "close", "volume")
-    else:
-        # The same trades-only fetch live.py and backfill.py use, which also
-        # moves the market's bookkeeping forward.
-        found = db.query("SELECT open_time, close_time FROM kalshi_markets"
-                         " WHERE ticker = %s", (ident,))
-        if not found:
-            return 0, "market not found"
-        row = found[0]
-        lo = int(row["open_time"].timestamp()) if row["open_time"] else now - 30 * 86400
-        lo = max(lo, now - settings.BACKFILL_DAYS * 86400)
-        hi = (min(int(row["close_time"].timestamp()) + 120, now)
-              if row["close_time"] else now)
-        hi = candle_fetch.minute(hi - settings.SETTLE_SECONDS)
-        if hi <= lo:
-            return 0, "market has no elapsed time yet"
-        total = 0
-        for planned in candle_fetch.plan([(ident, candle_fetch.minute(lo), hi)]):
-            n = candle_fetch.run(planned)
-            if n is None:
-                return total, "Kalshi did not answer; try again"
-            total += n
-        return total, None if total else "no trades in this market's history"
-
-    if not rows:
-        return 0, "the venue returned no candles for this market"
-    with connection() as conn:
-        with conn.cursor() as cur:
-            execute_values(cur,
-                           f"INSERT INTO {table} ({', '.join(cols)}) VALUES %s"
-                           " ON CONFLICT DO NOTHING", rows, page_size=1000)
-    return len(rows), None
+    # The same trades-only fetch live.py and backfill.py use, which also moves
+    # the market's bookkeeping forward.
+    found = db.query("SELECT open_time, close_time FROM kalshi_markets"
+                     " WHERE ticker = %s", (ident,))
+    if not found:
+        return 0, "market not found"
+    row = found[0]
+    lo = int(row["open_time"].timestamp()) if row["open_time"] else now - 30 * 86400
+    lo = max(lo, now - settings.BACKFILL_DAYS * 86400)
+    hi = (min(int(row["close_time"].timestamp()) + 120, now)
+          if row["close_time"] else now)
+    hi = candle_fetch.minute(hi - settings.SETTLE_SECONDS)
+    if hi <= lo:
+        return 0, "market has no elapsed time yet"
+    total = 0
+    for planned in candle_fetch.plan([(ident, candle_fetch.minute(lo), hi)]):
+        n = candle_fetch.run(planned)
+        if n is None:
+            return total, "Kalshi did not answer; try again"
+        total += n
+    return total, None if total else "no trades in this market's history"
 
 
 # Downloads run on a worker thread so the request returns immediately; the
@@ -2688,7 +2705,8 @@ def _run_fetch(job_id, name, ident):
         count, problem = fetch_candles(name, ident)
         elapsed = time.monotonic() - started
         state = (("error", problem) if problem else
-                 ("done", f"downloaded {count:,} candles in {elapsed:.0f}s"))
+                 ("done", f"downloaded {count:,} {'trades' if name in POLY else 'candles'}"
+                          f" in {elapsed:.0f}s"))
     except Exception as exc:
         state = ("error", f"{type(exc).__name__}: {exc}")
     with JOBS_LOCK:
@@ -2957,12 +2975,8 @@ VISUALISE_PAGE = """
 </style>
 
 <header>
-  <h2><a href="/" style="text-decoration:none;color:inherit">prediction_markets</a></h2>
-  <span class="links">
-    <a href="/table/kalshi_markets?dim=category">tables</a>
-    <a href="/stats">stats</a>
-    <a href="/manage">manage</a>
-  </span>
+  <h2><a href="/" style="text-decoration:none;color:inherit">prediction_markets</a> &middot; visualise</h2>
+  {{ NAV|safe }}
 </header>
 
 <form class="pick" method="get" action="/visualise">
@@ -3161,32 +3175,50 @@ def candle_source(ident):
     return None, None, None
 
 
+COUNT_VIEWS = ("kalshi_candle_counts", "poly_candle_counts")
+
+
+def refresh_counts(cur):
+    """Both candle-count views brought up to date (filled the first time)."""
+    for view in COUNT_VIEWS:
+        cur.execute("SELECT ispopulated FROM pg_matviews WHERE matviewname = %s", (view,))
+        populated = cur.fetchone()
+        if populated is not None:
+            cur.execute("REFRESH MATERIALIZED VIEW"
+                        + (" CONCURRENTLY" if populated[0] else "") + f" {view}")
+
+
 def counts_ready():
-    """Fill kalshi_candle_counts if the viewer's background refresh has not
+    """Fill the candle-count views if the viewer's background refresh has not
     yet (only right after it starts)."""
     if _cache.get(("counts ready",)):
         return
-    ready = db.query("SELECT ispopulated FROM pg_matviews WHERE matviewname = 'kalshi_candle_counts'")
-    if ready and not ready[0]["ispopulated"]:
-        db.execute("REFRESH MATERIALIZED VIEW kalshi_candle_counts")
+    for view in COUNT_VIEWS:
+        ready = db.query("SELECT ispopulated FROM pg_matviews WHERE matviewname = %s", (view,))
+        if ready and not ready[0]["ispopulated"]:
+            db.execute(f"REFRESH MATERIALIZED VIEW {view}")
     _cache[("counts ready",)] = True
 
 
-def plottable():
-    """Every market that actually has candles, for the picker and the list."""
+def _plottable():
     counts_ready()
     return db.query("""
-        SELECT c.ticker AS id, 'kalshi' AS venue, c.n,
-               c.first_ts::date::text AS first, c.last_ts::date::text AS last,
-               m.title
-        FROM kalshi_candle_counts c LEFT JOIN kalshi_markets m ON m.ticker = c.ticker
+        (SELECT c.ticker AS id, 'kalshi' AS venue, c.n,
+                c.first_ts::date::text AS first, c.last_ts::date::text AS last, m.title
+         FROM kalshi_candle_counts c LEFT JOIN kalshi_markets m ON m.ticker = c.ticker
+         ORDER BY c.n DESC LIMIT 2000)
         UNION ALL
-        SELECT c.condition_id, 'poly', count(*),
-               min(c.ts)::date::text, max(c.ts)::date::text, max(p.question)
-        FROM poly_candles c LEFT JOIN poly_markets p ON p.condition_id = c.condition_id
-        GROUP BY c.condition_id
+        (SELECT c.condition_id, 'poly', c.n, c.first_ts::date::text, c.last_ts::date::text,
+                p.question
+         FROM poly_candle_counts c LEFT JOIN poly_markets p ON p.condition_id = c.condition_id
+         ORDER BY c.n DESC LIMIT 2000)
         ORDER BY n DESC
         LIMIT 2000""")      # the busiest; any other ticker can be typed in
+
+
+def plottable():
+    """The markets with the most candles, for the picker and the list."""
+    return _cached(("plottable",), 900, _plottable)
 
 
 @app.route("/visualise")

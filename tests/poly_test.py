@@ -8,8 +8,9 @@ Runs in its own schema (pm_polytest), its own Redis (port 6392) and against
 tests/mock_poly.py, so neither the real data nor the real Polymarket is
 touched. The simulated venue trades about 900 times a minute -- as fast as the
 real one -- and a feed read goes back at most 2,000 trades (POLY_FEED_MOST) so a
-gap is only two minutes away; a market read at most 20,000 (POLY_MARKET_MOST), so
-the busiest still need midpoints. Its trades are known in advance, so every stored
+gap is only two minutes away; a market's trades are stored 5,000 at a time
+(POLY_MARKET_BATCH), so the busiest are read in many batches. Its trades are
+known in advance, so every stored
 trade and every candle is checked against them.
 
 Phases (numbers in /tmp/pmpoly/results.json):
@@ -52,8 +53,8 @@ T0 = int(time.time())
 ENV = dict(os.environ, PGSCHEMA=SCHEMA, REDIS_URL=f"redis://127.0.0.1:{REDIS_PORT}/0",
            REDIS_PREFIX="pmpoly:", PM_STATE_DIR=str(WORK / "state"), LIVE_VENUES="poly",
            KALSHI_API_URL="http://127.0.0.1:9/trade-api/v2",
-           POLY_GAMMA_URL=MOCK, POLY_CLOB_URL=MOCK, POLY_DATA_URL=MOCK,
-           POLY_FEED_MOST="2000", POLY_MARKET_MOST="20000", POLY_LIST_LAG_SECONDS="60",
+           POLY_GAMMA_URL=MOCK, POLY_DATA_URL=MOCK,
+           POLY_FEED_MOST="2000", POLY_MARKET_BATCH="5000", POLY_LIST_LAG_SECONDS="60",
            POLY_FEED_LAG_SECONDS="25", POLY_FEED_SECONDS="5",
            POLY_REQUESTS_PER_MIN="600", POLY_MAX_PER_SECOND="15",
            BACKFILL_DAYS="1", MARKET_SYNC_MINUTES="3", NET_PROBE_SECONDS="5",
@@ -156,24 +157,22 @@ def expected_candles(trades, yes):
 def check(label, sample=None):
     """Every tracked market whose history is complete: stored trades against
     the venue's, over the stretch its coverage claims; candles against the
-    trades; midpoint candles against the venue's midpoints."""
+    trades."""
     drain_candles()
     rows = db.query(f"""
         SELECT t.condition_id, m.yes_token_id,
                EXTRACT(EPOCH FROM t.history_from) AS h, EXTRACT(EPOCH FROM t.trades_from) AS f,
-               EXTRACT(EPOCH FROM poly_covered_to(t.trades_to)) AS c,
-               EXTRACT(EPOCH FROM t.mid_to) AS mid
+               EXTRACT(EPOCH FROM poly_covered_to(t.trades_to)) AS c
         FROM poly_tracking t JOIN poly_markets m USING (condition_id)
         WHERE {poly.HISTORY_DONE}""")
     if sample:
         rows = random.Random(1).sample(rows, min(sample, len(rows)))
     res = {"markets": len(rows), "trades_checked": 0, "missing": 0, "extra": 0,
-           "candles_checked": 0, "candles_wrong": 0, "mid_markets": 0, "mid_wrong": 0,
-           "bad_markets": []}
+           "candles_checked": 0, "candles_wrong": 0, "bad_markets": []}
 
     def one(r):
         cid, lo, hi = r["condition_id"], float(r["f"]), float(r["c"])
-        if r["mid"] is None and float(r["f"]) <= float(r["h"]):
+        if float(r["f"]) <= float(r["h"]):
             lo = float(r["h"])
         m = universe.by_cid[cid]
         truth = universe.truth(m, int(lo) + 1, int(hi))         # whole seconds inside
@@ -187,7 +186,7 @@ def check(label, sample=None):
         a, b = (int(lo) // 60 + 1) * 60, int(hi) // 60 * 60
         stored = {int(x["t"]): x for x in db.query(
             "SELECT EXTRACT(EPOCH FROM ts)::bigint AS t, open, high, low, close, volume, notional,"
-            " trades FROM poly_candles WHERE condition_id = %s AND source = 'trades'"
+            " trades FROM poly_candles WHERE condition_id = %s"
             " AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)", (cid, a, b))}
         wrong = 0
         for minute in set(k for k in exp if a <= k < b) | set(stored):
@@ -197,29 +196,20 @@ def check(label, sample=None):
                                           "trades"), e)):
                 wrong += 1
         checked = len(set(k for k in exp if a <= k < b) | set(stored))
-        mid_wrong = 0
-        if r["mid"] is not None:
-            mids = db.query("SELECT EXTRACT(EPOCH FROM ts)::bigint AS t, close FROM poly_candles"
-                            " WHERE condition_id = %s AND source = 'mid'", (cid,))
-            for x in mids:
-                if abs(float(x["close"]) - universe.price(m, int(x["t"]) // 60)) > 1e-6:
-                    mid_wrong += 1
-        return cid, len(want), missing, extra, checked, wrong, r["mid"] is not None, mid_wrong
+        return cid, len(want), missing, extra, checked, wrong
 
     with ThreadPoolExecutor(8) as pool:
-        for cid, n, missing, extra, checked, wrong, mid, mid_wrong in pool.map(one, rows):
+        for cid, n, missing, extra, checked, wrong in pool.map(one, rows):
             res["trades_checked"] += n
             res["missing"] += missing
             res["extra"] += extra
             res["candles_checked"] += checked
             res["candles_wrong"] += wrong
-            res["mid_markets"] += mid
-            res["mid_wrong"] += mid_wrong
-            if missing or extra or wrong or mid_wrong:
+            if missing or extra or wrong:
                 res["bad_markets"].append((cid[:12], universe.by_cid[cid]["kind"], missing, extra,
-                                           wrong, mid_wrong))
+                                           wrong))
     res["bad_markets"] = res["bad_markets"][:10]
-    res["ok"] = not (res["missing"] or res["extra"] or res["candles_wrong"] or res["mid_wrong"])
+    res["ok"] = not (res["missing"] or res["extra"] or res["candles_wrong"])
     say(f"check {label}: {res}")
     return res
 
@@ -279,8 +269,12 @@ def phase_live():
     code, secs = run("backfill", [sys.executable, "backfill.py", "--venue", "poly"], timeout=1800)
     res = {"backfill_exit": code, "backfill_seconds": secs, "history_left": history_left()}
     stats = requests.get(f"{MOCK}/_stats", timeout=60).json()
-    res["backfill_requests"] = sum(1 for s in stats if s["at"] >= a and s["path"] == "/trades")
-    res["backfill_mid_requests"] = sum(1 for s in stats if s["at"] >= a and s["path"] == "/prices-history")
+    res["backfill_requests"] = sum(1 for s in stats if s["at"] >= a and s["path"] == "/v2/trades")
+    # Every market read whole: the busiest ("huge") ones in several batches.
+    res["huge_markets_whole"] = db.query(
+        "SELECT count(*) FILTER (WHERE trades_from <= history_from) AS whole, count(*) AS n"
+        " FROM poly_tracking WHERE condition_id = ANY(%s)",
+        ([m["cid"] for m in universe.markets if m["kind"] == "huge"],))[0]
     say(f"live: backfill {res}; letting the feed run 4 minutes with new markets opening")
     time.sleep(240)
     res["behind"] = behind()
@@ -434,8 +428,7 @@ def phase_load():
     recent = [x for x in stats if x["at"] >= a]
     res = {"requests_per_min_at_rest": round(len(recent) / 2, 1),
            "by_path": {p: sum(1 for x in recent if x["path"] == p) for p in {x["path"] for x in recent}}}
-    lag = db.query("SELECT EXTRACT(EPOCH FROM now() - max(ts)) AS s FROM poly_candles"
-                   " WHERE source = 'trades'")[0]["s"]
+    lag = db.query("SELECT EXTRACT(EPOCH FROM now() - max(ts)) AS s FROM poly_candles")[0]["s"]
     feed = db.query("SELECT EXTRACT(EPOCH FROM now() - covered_to) AS s FROM poly_feed")[0]["s"]
     res["newest_candle_age_s"] = round(lag)
     res["feed_behind_s"] = round(feed)

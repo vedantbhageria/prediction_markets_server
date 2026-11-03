@@ -22,9 +22,8 @@ alongside discover.py and live.py without ever pushing the total over it.
 
 Polymarket (--venue poly, or both with --venue all): a market's history is its
 trade list, read once, newest first, back to its start -- one request for all
-but the busiest. A market is read back at most POLY_MARKET_MOST trades
-(200,000); for the few with more, the time before the oldest read is filled from the
-per-minute order-book midpoint (candles marked source 'mid'). The markets
+but the busiest, and the busiest are stored a batch at a time as they are
+read (POLY_MARKET_BATCH), so every market is read whole. The markets
 take the same selection options, by condition id (--ticker), event id
 (--event) and --open / --closed; --series and --category are Kalshi's only.
 
@@ -324,17 +323,11 @@ def poly_history(cond, params, stop, limit=None, dry_run=False):
         log.info("poly: %s markets never traded: history complete without a request",
                  f"{marked:,}")
     started, done, failed_ids = time.time(), 0, set()
-    totals = {"markets": 0, "failed": 0, "trades": 0, "cut off": 0, "mid candles": 0}
+    totals = {"markets": 0, "failed": 0, "trades": 0}
 
     def one(cid):
         with ratelimit.using("backfill"):
-            if stop.is_set():
-                return cid, None, None
-            got = poly.fetch_market(cid, stop)
-            mid = None
-            if got is not None and not got[1]:
-                mid = poly.fill_mid(cid, stop)
-            return cid, got, mid
+            return cid, None if stop.is_set() else poly.fetch_market(cid, stop)
 
     with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="backfill") as pool:
         while not stop.is_set():
@@ -349,14 +342,12 @@ def poly_history(cond, params, stop, limit=None, dry_run=False):
                 print(f"next round: {len(todo):,} Polymarket markets, about {len(todo):,} requests")
                 return
             round_trades = round_failed = 0
-            for cid, got, mid in pool.map(one, todo):
+            for cid, got in pool.map(one, todo):
                 if got is None:
                     failed_ids.add(cid)
                     round_failed += 1
                     continue
-                round_trades += got[0]
-                totals["cut off"] += not got[1]
-                totals["mid candles"] += mid or 0
+                round_trades += got
             done += len(todo)
             totals["markets"] += len(todo) - round_failed
             totals["failed"] += round_failed
@@ -372,7 +363,6 @@ def poly_report(cond, params):
         SELECT count(*) AS markets, count(t.condition_id) AS tracked,
                count(*) FILTER (WHERE t.condition_id IS NOT NULL AND {poly.HISTORY_DONE}) AS done,
                count(*) FILTER (WHERE t.condition_id IS NOT NULL AND NOT {poly.TRADED}) AS never,
-               count(*) FILTER (WHERE t.mid_to IS NOT NULL) AS mid,
                count(*) FILTER (WHERE t.condition_id IS NOT NULL AND {poly.HISTORY_DONE}
                                 AND {poly.BEHIND}) AS behind
         FROM poly_markets m LEFT JOIN poly_tracking t USING (condition_id)
@@ -381,7 +371,7 @@ def poly_report(cond, params):
     print(f"markets               {r['markets']:>12,}")
     print(f"  tracked             {r['tracked']:>12,}")
     print(f"  never traded        {r['never']:>12,}")
-    print(f"  history complete    {r['done']:>12,}   ({r['mid']:,} partly from midpoints)")
+    print(f"  history complete    {r['done']:>12,}")
     print(f"  history to fetch    {r['tracked'] - r['done']:>12,}   markets, about one request each")
     print(f"  behind the present  {r['behind']:>12,}   (traded in a feed gap; trades.py catches up)")
     if feed:
@@ -411,13 +401,9 @@ def poly_verify(cond, params, limit, repair):
     checked = bad = missing_total = 0
     for r in rows:
         a, b = float(r["a"]), float(r["b"]) - 60
-        trades, whole = poly.read_market(r["condition_id"], a)
+        trades = [x for page in poly.pages(r["condition_id"], a) for x in page]
         listed = {x[2]: x for x in map(poly.row, trades)
                   if x is not None and a <= x[1].timestamp() < b}
-        if not whole:
-            oldest = min(int(x["timestamp"]) for x in trades)
-            a = max(a, oldest + 1)
-            listed = {k: v for k, v in listed.items() if v[1].timestamp() >= a}
         stored = {x["trade_id"] for x in db.query(
             "SELECT trade_id FROM poly_trades WHERE condition_id = %s"
             " AND ts >= to_timestamp(%s) AND ts < to_timestamp(%s)", (r["condition_id"], a, b))}

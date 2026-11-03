@@ -9,7 +9,7 @@ market open now or closed in the last 30 days, with one-minute trade candles
 - The stress test of 1 Nov 2026 and what it fixed:
   [`docs/stress-test-2026-11-01.html`](docs/stress-test-2026-11-01.html).
 
-## The eight programs
+## The ten programs
 
 | Program | What it does | Runs |
 |---|---|---|
@@ -19,6 +19,8 @@ market open now or closed in the last 30 days, with one-minute trade candles
 | `trades.py` | every Polymarket trade: the feed every 15 s, gaps caught up market by market | always |
 | `aggregate.py` | Polymarket one-minute candles, made from the stored trades | always |
 | `backfill.py` | fills history on both venues (`--venue all`); `--report`, `--verify`, `--refetch` | always; reruns every 15 min once done |
+| `match.py` | one record per market and a vector per question template, for `/similar` | always, every 10 min |
+| `check.py` | the daily data check: re-reads samples, looks for gaps and impossible values, pushes the result through ntfy | always, once a day at 09:00 UTC |
 | `api/` | the HTTP API, 4 processes | always |
 | `viewer.py` | the browser viewer, `/status` charts | always |
 
@@ -26,7 +28,7 @@ They run as systemd services, so they start on boot and restart if they crash:
 
 ```bash
 sudo bash deploy/install-services.sh        # once: moves them from tmux to services
-systemctl status prediction-markets-live    # any of the six
+systemctl status prediction-markets-live    # any of the ten
 tail -f ~/logs/live.log                     # each writes ~/logs/<program>.log
 sudo systemctl restart prediction-markets-api
 ```
@@ -89,10 +91,9 @@ the price of the market's first outcome (a trade in the other at p counts as
 stretch again.
 
 **backfill.py --venue poly** reads each market's trade list once, back to its
-start: one request for all but the busiest. A market is read back at most
-`POLY_MARKET_MOST` trades (200,000); older history of the few busier ones is filled from its
-per-minute order-book midpoint, as candles marked `source = 'mid'` (one
-price, no volume).
+start: one request for all but the busiest, which are stored
+`POLY_MARKET_BATCH` (50,000) trades at a time as they are read -- so every
+market's history is its real trades, however many there are.
 
 ```bash
 python backfill.py --venue poly --report
@@ -221,5 +222,4 @@ auto-generated multi-leg parlays; discovery leaves them out.
 
 **Polymarket's own price history is not OHLC.** Its `/prices-history` returns
 the order-book midpoint once a minute, not trades. The candles here are made
-from trades instead and are genuine OHLCV; only the `source = 'mid'` ones (old
-history of the busiest markets) are midpoints.
+from trades instead and are genuine OHLCV, every one.
