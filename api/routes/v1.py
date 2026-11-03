@@ -669,8 +669,8 @@ def market_similar(ticker: str = TICKER,
                        None, description="subject, keywords (comma-separated): drop pairs"
                        " about a different subject, or whose key words or names differ"),
                    format: Format = FORMAT):
-    """Nearest first, by one distance made of the text, timing and level gaps
-    (each also given on its own). See /docs for the formula. `relation` reads
+    """Nearest first, by one distance made of the text, timing, level and name
+    gaps (each also given on its own). See /docs for the formula. `relation` reads
     how the two questions relate, from their fields; it filters nothing."""
     wanted = set(_names(gates) or [])
     unknown = wanted - {"subject", "keywords"}

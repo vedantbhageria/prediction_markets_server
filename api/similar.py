@@ -16,11 +16,18 @@
        level     relative gap between their thresholds, |a - b| / max(|a|, |b|)
                  (0.05 = 5%), where both have one in the same unit
        opposite  true where one asks "above" and the other "below"
+       name      how far apart the two named outcomes are, where the market
+                 asked about has one: 1 - trigram similarity of the two names
+                 (0 = the same name; "Los Angeles R" and "Los Angeles Rams"
+                 about 0.2), and 1 for a market with no name. The template
+                 masks the name, so without it every candidate in a "who will
+                 win" event looks equally near.
 
    and those make one distance to sort by:
 
        distance = text + 0.10 * min(days, 730) / 365
                        + 0.50 * min(level, 1) + (0.05 if opposite)
+                       + 0.40 * name
 
 4. The limits asked for drop what is too far: max_cosine on text, max_days
    on days, max_level on level. A limit applies only where both markets have
@@ -37,13 +44,15 @@ reading aid, not a filter; nothing is stored.
 """
 
 from api.common import ApiError
+import re
+
 import relate as R
 
 UP = {"greater", "greater_or_equal"}
 DOWN = {"less", "less_or_equal"}
 COLUMNS = ["ticker", "venue", "title", "status", "same_event", "kind", "subject", "entity",
            "comparator", "low", "high", "unit", "when", "when_kind", "text", "days", "level",
-           "opposite", "distance", "relation"]
+           "opposite", "name", "distance", "relation"]
 VENUE_SQL = {
     "kalshi": """SELECT p.*, m.title, (m.close_time > now()) AS open
                  FROM propositions p JOIN kalshi_markets m ON m.ticker = p.market_id
@@ -89,9 +98,45 @@ def _opposite(a, b):
     return (ca in UP and cb in DOWN) or (ca in DOWN and cb in UP)
 
 
-def distance(text, days, level, opposite):
+def _grams(name):
+    """pg_trgm's trigrams of a name's words of two letters or more (a party
+    suffix like "(R)" says nothing about who it is)."""
+    out = set()
+    for word in re.findall(r"[a-z0-9]+", (name or "").lower()):
+        if len(word) > 1:
+            word = "  " + word + " "
+            out |= {word[i:i + 3] for i in range(len(word) - 2)}
+    return out
+
+
+def _abbreviates(a, b):
+    """One name is the other cut short, word for word: "Los Angeles R" and
+    "Los Angeles Rams", "South Dakota St." and "South Dakota State", "August
+    Pfluger" and "August Pfluger (R)". Two words at least, so "Drake" does
+    not match "Drake Bell"."""
+    wa, wb = re.findall(r"[a-z0-9]+", a.lower()), re.findall(r"[a-z0-9]+", b.lower())
+    short, long_ = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+    return (len(short) >= 2 and long_[:len(short) - 1] == short[:-1]
+            and long_[len(short) - 1].startswith(short[-1]))
+
+
+def _name(a, b):
+    """1 - trigram similarity of the two named outcomes (0 where one name
+    abbreviates the other); 1 where only the market asked about has one;
+    None where it has none (nothing to compare)."""
+    if not a.get("entity"):
+        return None
+    if b.get("entity") and _abbreviates(a["entity"], b["entity"]):
+        return 0.0
+    ga, gb = _grams(a["entity"]), _grams(b.get("entity"))
+    if not ga or not gb:
+        return 1.0
+    return 1 - len(ga & gb) / len(ga | gb)
+
+
+def distance(text, days, level, opposite, name=None):
     return (text + 0.10 * min(days or 0, 730) / 365 + 0.50 * min(level or 0, 1)
-            + (0.05 if opposite else 0))
+            + (0.05 if opposite else 0) + 0.40 * (name or 0))
 
 
 def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
@@ -150,7 +195,7 @@ def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
         if c["venue"] == me["venue"] and c["market_id"] == me["market_id"]:
             continue
         text = near[c["template"]]
-        days, level, opp = _days(me, c), _level(me, c), _opposite(me, c)
+        days, level, opp, name = _days(me, c), _level(me, c), _opposite(me, c), _name(me, c)
         if max_days is not None and days is not None and days > max_days:
             continue
         if max_level is not None and level is not None and level > max_level:
@@ -171,7 +216,8 @@ def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
             "comparator": c["comparator"], "low": c["low"], "high": c["high"], "unit": c["unit"],
             "when": c["when"], "when_kind": c["when_kind"],
             "text": round(text, 4), "days": days, "level": None if level is None else round(level, 4),
-            "opposite": opp, "distance": round(distance(text, days, level, opp), 4),
+            "opposite": opp, "name": None if name is None else round(name, 4),
+            "distance": round(distance(text, days, level, opp, name), 4),
             "relation": R.relate(me, c)[0]})
     rows.sort(key=lambda r: (r["distance"], r["ticker"]))
     return rows[:limit], me

@@ -83,6 +83,8 @@ def load():
              "JD Vance", end="2028-11-07T12:00:00Z"),
         poly("0xc2", {"id": "e3", "tags": []}, "Will E win the 2028 US Presidential Election?", "E",
              end="2028-11-07T12:00:00Z"),
+        poly("0xc3", {"id": "e3", "tags": []}, "Will Gavin Newsom win the 2028 US Presidential Election?",
+             "Gavin Newsom", end="2028-11-07T12:00:00Z"),
         poly("0xd1", {"id": "e4", "tags": []}, "Will Bitcoin be above $70,000 on December 31, 2025?", "↑ 70,000",
              end="2025-12-31T12:00:00Z", closed=True),
     ]
@@ -171,6 +173,15 @@ def main():
           any(r["ticker"] == "0xc1" and r["relation"] == "same_outcome" for r in pres),
           [(r["ticker"], r["relation"]) for r in pres])
     check("placeholders are never returned", all(r["ticker"] != "0xc2" for r in pres))
+    # Both Polymarket candidates share one masked template; the name decides.
+    on_poly = ask("KXPRES-28-JV", limit=10, max_cosine=0.5, venue="poly")
+    check("the same named outcome ranks first (JD Vance before Gavin Newsom)",
+          [r["ticker"] for r in on_poly][:2] == ["0xc1", "0xc3"], [(r["ticker"], r["name"]) for r in on_poly])
+    check("an abbreviated name matches its own, not a neighbour's",
+          S._name({"entity": "Los Angeles R"}, {"entity": "Los Angeles Rams"}) == 0
+          and S._name({"entity": "Los Angeles R"}, {"entity": "Los Angeles Chargers"}) > 0.3
+          and S._name({"entity": "Drake"}, {"entity": "Drake Bell"}) > 0
+          and S._name({"entity": None}, {"entity": "x"}) is None)
     try:
         ask("0xc2")
         check("asking about a placeholder is refused", False)

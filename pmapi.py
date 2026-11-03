@@ -240,7 +240,8 @@ class Client:
         largest gap between the dates the questions turn on. max_level:
         largest relative gap between thresholds (0.1 = 10%). gates: "subject"
         and/or "keywords" to drop near-misses. Columns: text, days, level,
-        opposite, the combined distance, and `relation` (identical,
+        opposite, name (how far apart the named outcomes are), the combined
+        distance, and `relation` (identical,
         complement, nested, overlapping, same_outcome, related)."""
         if gates is not None and not isinstance(gates, str):
             gates = ",".join(gates)
