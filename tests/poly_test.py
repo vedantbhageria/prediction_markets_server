@@ -301,7 +301,9 @@ def phase_gap():
     took = wait_until(lambda: len(log_lines("trades", "feed gap")) > gaps_before, 120, 2)
     # The catch-up waits for discovery to see which markets moved (a pass is
     # three minutes here), then reads them.
-    recovered = wait_until(lambda: behind() == 0 and len(log_lines("trades", "caught up")) > 0,
+    # (Only catch-up rounds after the gap count: the log keeps earlier runs'.)
+    rounds_before = len(log_lines("trades", "caught up"))
+    recovered = wait_until(lambda: behind() == 0 and len(log_lines("trades", "caught up")) > rounds_before,
                            900, 10)
     time.sleep(60)
     res = {"gap_noticed_after_s": took, "caught_up_after_s": round(time.time() - a) if recovered is not None else None,
@@ -321,11 +323,13 @@ def phase_restart():
     stop("trades", signal.SIGKILL)
     stop("aggregate", signal.SIGKILL)
     time.sleep(180)
+    rounds_before = len(log_lines("trades", "caught up"))
     start("trades", [sys.executable, "trades.py"])
     start("aggregate", [sys.executable, "aggregate.py"])
     a = time.time()
     time.sleep(30)
-    recovered = wait_until(lambda: behind() == 0, 900, 10)
+    recovered = wait_until(lambda: behind() == 0 and len(log_lines("trades", "caught up")) > rounds_before,
+                           900, 10)
     time.sleep(60)
     res = {"recovered_after_s": round(time.time() - a), "check": check("restart"),
            "behind_after": behind()}
