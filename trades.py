@@ -86,11 +86,17 @@ def catch_up_loop(stop):
             stop.wait(15)
             continue
         started = time.time()
-        results = list(pool.map(one, todo))
+        try:
+            results = list(pool.map(one, todo))
+        except Exception as exc:
+            # A round that fails is logged and tried again; the thread never
+            # dies with it (markets would stay behind with nothing said).
+            log.warning("catch-up round failed: %s: %s", type(exc).__name__, exc)
+            stop.wait(30)
+            continue
         ok = [r for r in results if r is not None]
         log.info("caught up %s markets (%s failed): %s new trades, %.0fs", f"{len(ok):,}",
-                 f"{len(results) - len(ok):,}", f"{sum(r[0] for r in ok):,}",
-                 time.time() - started)
+                 f"{len(results) - len(ok):,}", f"{sum(ok):,}", time.time() - started)
         if not ok:
             stop.wait(30)
     pool.shutdown(wait=True, cancel_futures=True)

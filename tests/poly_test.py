@@ -306,6 +306,12 @@ def phase_gap():
     time.sleep(60)
     res = {"gap_noticed_after_s": took, "caught_up_after_s": round(time.time() - a) if recovered is not None else None,
            "catch_up_rounds": log_lines("trades", "caught up")[-3:], "check": check("gap")}
+    # The check compares what each market's coverage claims; a market never
+    # caught up claims less, so it is checked here: every market caught up.
+    res["behind_after"] = behind()
+    res["ok"] = recovered is not None and res["behind_after"] == 0 and res["check"]["ok"]
+    if not res["ok"]:
+        say(f"FAIL gap: caught up {recovered is not None}, {res['behind_after']} markets still behind")
     results["gap"] = res
     save()
 
@@ -319,9 +325,14 @@ def phase_restart():
     start("aggregate", [sys.executable, "aggregate.py"])
     a = time.time()
     time.sleep(30)
-    wait_until(lambda: behind() == 0, 900, 10)
+    recovered = wait_until(lambda: behind() == 0, 900, 10)
     time.sleep(60)
-    results["restart"] = {"recovered_after_s": round(time.time() - a), "check": check("restart")}
+    res = {"recovered_after_s": round(time.time() - a), "check": check("restart"),
+           "behind_after": behind()}
+    res["ok"] = recovered is not None and res["behind_after"] == 0 and res["check"]["ok"]
+    if not res["ok"]:
+        say(f"FAIL restart: {res['behind_after']} markets still behind")
+    results["restart"] = res
     save()
 
 
