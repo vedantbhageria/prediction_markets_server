@@ -12,6 +12,7 @@
     --cold: #1c7ed6; --cold-soft: #e7f3ff; --ok: #2b8a3e; --ok-soft: #e6f6ea;
     --bad: #c92a2a; --bad-soft: #ffeceb; --kalshi: #0b7285; --kalshi-soft: #e3f7fa;
     --db: #6741d9; --db-soft: #f0ebff; --you: #2b8a3e; --you-soft: #e6f6ea;
+    --poly: #99542a; --poly-soft: #fbefe6;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -20,7 +21,7 @@
       --hot: #ff8a4c; --hot-soft: #3a2316; --warm: #ffd43b; --warm-soft: #352d10;
       --cold: #74c0fc; --cold-soft: #13293d; --ok: #69db7c; --ok-soft: #15301c;
       --bad: #ff8787; --bad-soft: #3a1a1a; --kalshi: #66d9e8; --kalshi-soft: #0f2d33;
-      --db: #b197fc; --db-soft: #261d42; --you: #69db7c; --you-soft: #15301c;
+      --db: #b197fc; --db-soft: #261d42; --you: #69db7c; --you-soft: #15301c; --poly: #f0a46c; --poly-soft: #3a2616;
     }
   }
   :root[data-theme="dark"] {
@@ -29,7 +30,7 @@
     --hot: #ff8a4c; --hot-soft: #3a2316; --warm: #ffd43b; --warm-soft: #352d10;
     --cold: #74c0fc; --cold-soft: #13293d; --ok: #69db7c; --ok-soft: #15301c;
     --bad: #ff8787; --bad-soft: #3a1a1a; --kalshi: #66d9e8; --kalshi-soft: #0f2d33;
-    --db: #b197fc; --db-soft: #261d42; --you: #69db7c; --you-soft: #15301c;
+    --db: #b197fc; --db-soft: #261d42; --you: #69db7c; --you-soft: #15301c; --poly: #f0a46c; --poly-soft: #3a2616;
   }
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
@@ -109,6 +110,10 @@
     td:first-child { white-space: normal; }
     .two { grid-template-columns: 1fr; }
   }
+  .tablecard td:first-child { white-space: normal; }
+  table.dec td:first-child { white-space: nowrap; color: var(--muted); }
+  table.dec td:nth-child(2) { font-weight: 600; }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
 </style>
 </head>
 <body>
@@ -117,192 +122,159 @@
 <header>
   <div class="eyebrow">Architecture · kept up to date</div>
   <h1>Prediction markets server</h1>
-  <p class="lede">A 24/7 Ubuntu machine that keeps every Kalshi market from the last 30 days, with one-minute trade candles, a viewer and an API.</p>
+  <p class="lede">A 24/7 Ubuntu machine that keeps every Kalshi and Polymarket market open now or closed in the last 30 days: Kalshi's one-minute candles, every Polymarket trade and the candles made from them, a search for similar markets across both venues, a viewer and one API.</p>
   <div class="stats">
-    <div class="stat"><b>~185,000</b><span>Kalshi markets open right now</span></div>
-    <div class="stat"><b>2.87 million</b><span>markets stored (open + closed in 30 days)</span></div>
-    <div class="stat"><b>1 minute</b><span>candle size, rolled up to 5m · 15m · 1h</span></div>
-    <div class="stat"><b>240 / min</b><span>Kalshi requests, shared by every program</span></div>
+    <div class="stat"><b>2.93M</b><span>Kalshi markets stored</span></div>
+    <div class="stat"><b>1.62M</b><span>Polymarket markets stored</span></div>
+    <div class="stat"><b>19.0M</b><span>Kalshi one-minute candles</span></div>
+    <div class="stat"><b>5.5M</b><span>Polymarket trades stored, every one</span></div>
+    <div class="stat"><b>324,898</b><span>question templates with a vector</span></div>
+    <div class="stat"><b>10</b><span>programs, each restartable on its own</span></div>
   </div>
 </header>
 
 <nav class="tabs" role="tablist">
-  <a href="#architecture" role="tab" aria-selected="true" data-tab="architecture">Architecture</a>
-  <a href="#api" role="tab" aria-selected="false" data-tab="api">API</a>
+  <a href="#architecture" data-tab="architecture" role="tab">Architecture</a>
+  <a href="#api" data-tab="api" role="tab">API</a>
+  <a href="#decisions" data-tab="decisions" role="tab">Decisions</a>
 </nav>
 
-<div class="tab" id="architecture" role="tabpanel">
+<div class="tab" id="architecture">
 
-<!-- 1 ------------------------------------------------------------------->
 <section>
   <h2><span class="n">1</span>The big picture</h2>
-  <p class="sub">Kalshi in, four programs, one database, two ways to look at it.</p>
-  <div class="fig">
-    <svg viewBox="0 0 900 430" role="img" aria-label="Kalshi feeds four programs that write to PostgreSQL; the viewer and API read it; you reach them over Tailscale">
+  <p class="sub">Two venues in, ten programs, one database, two ways to look at it (check.py, the daily check, reads everything and is left out of the picture).</p>
+  <div class="fig"><svg viewBox="0 0 960 520" role="img" aria-label="Kalshi and Polymarket feed seven programs that write to PostgreSQL; the viewer and API read it; you reach them over Tailscale">
       <defs>
         <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
         </marker>
       </defs>
-      <!-- Kalshi -->
-      <rect x="20" y="150" width="150" height="120" rx="18" fill="var(--kalshi-soft)" stroke="var(--kalshi)" stroke-width="2"/>
-      <text x="95" y="200" text-anchor="middle" font-size="20" font-weight="700" fill="var(--kalshi)">Kalshi</text>
-      <text x="95" y="226" text-anchor="middle" font-size="13" fill="var(--muted)">public API</text>
+      <!-- venues -->
+      <rect x="16" y="70" width="150" height="120" rx="18" fill="var(--kalshi-soft)" stroke="var(--kalshi)" stroke-width="2"/>
+      <text x="91" y="122" text-anchor="middle" font-size="20" font-weight="700" fill="var(--kalshi)">Kalshi</text>
+      <text x="91" y="146" text-anchor="middle" font-size="13" fill="var(--muted)">candles API</text>
+      <rect x="16" y="300" width="150" height="120" rx="18" fill="var(--poly-soft)" stroke="var(--poly)" stroke-width="2"/>
+      <text x="91" y="352" text-anchor="middle" font-size="20" font-weight="700" fill="var(--poly)">Polymarket</text>
+      <text x="91" y="376" text-anchor="middle" font-size="13" fill="var(--muted)">trades API v2</text>
       <!-- programs -->
       <g font-size="15">
-        <rect x="250" y="40" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
-        <text x="270" y="68" font-weight="700" fill="var(--ink)">discover.py</text>
-        <text x="270" y="90" font-size="13" fill="var(--muted)">finds markets · every 15 min</text>
-
-        <rect x="250" y="130" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
-        <text x="270" y="158" font-weight="700" fill="var(--ink)">activity.py</text>
-        <text x="270" y="180" font-size="13" fill="var(--muted)">scores busy-ness · after scans</text>
-
-        <rect x="250" y="220" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
-        <text x="270" y="248" font-weight="700" fill="var(--ink)">live.py</text>
-        <text x="270" y="270" font-size="13" fill="var(--muted)">new candles · every minute</text>
-
-        <rect x="250" y="310" width="200" height="66" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
-        <text x="270" y="338" font-weight="700" fill="var(--ink)">backfill.py</text>
-        <text x="270" y="360" font-size="13" fill="var(--muted)">history &amp; repairs · by hand</text>
+        <rect x="240" y="20" width="210" height="58" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="258" y="45" font-weight="700" fill="var(--ink)">discover.py</text>
+        <text x="258" y="66" font-size="12" fill="var(--muted)">both venues' listings · 15 min</text>
+        <rect x="240" y="92" width="210" height="58" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="258" y="117" font-weight="700" fill="var(--ink)">activity.py → live.py</text>
+        <text x="258" y="138" font-size="12" fill="var(--muted)">Kalshi hot list · candles each minute</text>
+        <rect x="240" y="164" width="210" height="58" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="258" y="189" font-weight="700" fill="var(--ink)">backfill.py</text>
+        <text x="258" y="210" font-size="12" fill="var(--muted)">history on both venues</text>
+        <rect x="240" y="300" width="210" height="58" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="258" y="325" font-weight="700" fill="var(--ink)">trades.py</text>
+        <text x="258" y="346" font-size="12" fill="var(--muted)">every Polymarket trade · 15 s</text>
+        <rect x="240" y="372" width="210" height="58" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="258" y="397" font-weight="700" fill="var(--ink)">aggregate.py</text>
+        <text x="258" y="418" font-size="12" fill="var(--muted)">trades → one-minute candles</text>
+        <rect x="240" y="444" width="210" height="58" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="258" y="469" font-weight="700" fill="var(--ink)">match.py</text>
+        <text x="258" y="490" font-size="12" fill="var(--muted)">records + vectors · 10 min</text>
       </g>
-      <!-- arrows kalshi -> programs -->
-      <path d="M170 190 C 210 190, 210 73, 248 73" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <path d="M170 225 C 210 225, 210 253, 248 253" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <path d="M170 240 C 210 240, 210 343, 248 343" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <!-- budget badge -->
-      <rect x="138" y="388" width="200" height="30" rx="15" fill="var(--warm-soft)"/>
-      <text x="238" y="408" text-anchor="middle" font-size="13" font-weight="600" fill="var(--warm)">one shared request budget</text>
+      <path d="M166 110 C 200 110, 205 49, 238 49" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M166 130 L 238 121" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M166 160 C 200 160, 205 193, 238 193" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M166 320 C 205 300, 200 80, 238 60" fill="none" stroke="var(--poly)" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+      <path d="M166 330 C 205 320, 200 215, 238 205" fill="none" stroke="var(--poly)" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+      <path d="M166 345 L 238 330" fill="none" stroke="var(--poly)" stroke-width="2" marker-end="url(#arr)"/>
+      <rect x="22" y="456" width="190" height="30" rx="15" fill="var(--warm-soft)"/>
+      <text x="117" y="476" text-anchor="middle" font-size="13" font-weight="600" fill="var(--warm)">a request budget per venue</text>
       <!-- DB -->
       <g>
-        <ellipse cx="610" cy="140" rx="80" ry="20" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
-        <path d="M530 140 v150 a80 20 0 0 0 160 0 v-150" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
-        <ellipse cx="610" cy="140" rx="80" ry="20" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
-        <text x="610" y="215" text-anchor="middle" font-size="16" font-weight="700" fill="var(--db)">PostgreSQL</text>
-        <text x="610" y="238" text-anchor="middle" font-size="13" fill="var(--muted)">+ TimescaleDB</text>
-        <text x="610" y="258" text-anchor="middle" font-size="13" fill="var(--muted)">+ Redis beside it</text>
+        <ellipse cx="620" cy="160" rx="86" ry="20" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+        <path d="M534 160 v190 a86 20 0 0 0 172 0 v-190" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+        <ellipse cx="620" cy="160" rx="86" ry="20" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+        <text x="620" y="236" text-anchor="middle" font-size="16" font-weight="700" fill="var(--db)">PostgreSQL</text>
+        <text x="620" y="260" text-anchor="middle" font-size="13" fill="var(--muted)">+ TimescaleDB</text>
+        <text x="620" y="280" text-anchor="middle" font-size="13" fill="var(--muted)">+ pgvector</text>
+        <text x="620" y="300" text-anchor="middle" font-size="13" fill="var(--muted)">+ Redis beside it</text>
       </g>
-      <path d="M450 73 C 495 73, 500 160, 528 175" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <path d="M452 163 L 528 200" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)" marker-start="url(#arr)"/>
-      <path d="M452 253 L 528 235" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <path d="M450 343 C 495 343, 500 280, 528 265" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M450 49 C 500 49, 505 175, 532 190" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M450 121 L 532 215" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M450 193 L 532 240" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M450 329 L 532 290" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M452 401 L 532 320" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)" marker-start="url(#arr)"/>
+      <path d="M452 473 C 500 473, 505 360, 532 345" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)" marker-start="url(#arr)"/>
       <!-- readers -->
-      <rect x="740" y="120" width="140" height="56" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
-      <text x="810" y="144" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">viewer</text>
-      <text x="810" y="164" text-anchor="middle" font-size="12" fill="var(--muted)">browser, login</text>
-      <rect x="740" y="200" width="140" height="56" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
-      <text x="810" y="224" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">API</text>
-      <text x="810" y="244" text-anchor="middle" font-size="12" fill="var(--muted)">for Python · keys</text>
-      <path d="M690 180 L 738 150" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <path d="M690 215 L 738 226" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
-      <!-- you -->
-      <rect x="740" y="300" width="140" height="70" rx="14" fill="var(--you-soft)" stroke="var(--you)" stroke-width="2"/>
-      <text x="810" y="328" text-anchor="middle" font-size="15" font-weight="700" fill="var(--you)">you</text>
-      <text x="810" y="350" text-anchor="middle" font-size="12" fill="var(--muted)">laptop · iPad</text>
-      <path d="M810 298 L 810 258" fill="none" stroke="var(--you)" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arr)"/>
-      <text x="822" y="285" font-size="12" fill="var(--you)">Tailscale</text>
-    </svg>
-  </div>
+      <rect x="790" y="130" width="150" height="60" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="865" y="156" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">viewer</text>
+      <text x="865" y="176" text-anchor="middle" font-size="12" fill="var(--muted)">browser, login</text>
+      <rect x="790" y="220" width="150" height="60" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="865" y="246" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">API</text>
+      <text x="865" y="266" text-anchor="middle" font-size="12" fill="var(--muted)">for Python · keys</text>
+      <path d="M706 200 L 788 163" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <path d="M706 240 L 788 248" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+      <rect x="790" y="340" width="150" height="70" rx="14" fill="var(--you-soft)" stroke="var(--you)" stroke-width="2"/>
+      <text x="865" y="368" text-anchor="middle" font-size="15" font-weight="700" fill="var(--you)">you</text>
+      <text x="865" y="390" text-anchor="middle" font-size="12" fill="var(--muted)">laptop · iPad</text>
+      <path d="M865 338 L 865 282" fill="none" stroke="var(--you)" stroke-width="2" stroke-dasharray="5 5" marker-end="url(#arr)"/>
+      <text x="877" y="316" font-size="12" fill="var(--you)">Tailscale</text>
+    </svg></div>
 </section>
 
-<!-- 2 ------------------------------------------------------------------->
 <section>
   <h2><span class="n">2</span>The machine and how you reach it</h2>
   <p class="sub">One PC on the office network, reachable only through your own devices.</p>
   <div class="grid">
     <div class="item"><h3>Ubuntu Server LTS</h3><p>8 cores, 44 GB RAM, 500 GB NVMe; RAM tested, idle power-saving off.</p></div>
-    <div class="item"><h3>Tailscale</h3><p>Private network between server, laptop and iPad — server is <code>100.106.150.105</code>.</p></div>
+    <div class="item"><h3>Tailscale</h3><p>Private network between server, laptop and iPad; the server is <code>100.106.150.105</code>.</p></div>
     <div class="item"><h3>SSH with keys</h3><p>Laptop and iPad (Termius) log in with keys, no password needed.</p></div>
     <div class="item"><h3>Encrypted DNS</h3><p>Cloudflare DNS over TLS, because the office network refuses normal lookups.</p></div>
-    <div class="item"><h3>Public links <span class="pill ok">Funnel</span></h3><p>Viewer on <code>https://…ts.net</code>, API on port <code>8443</code>; each needs its login or key.</p></div>
-    <div class="item"><h3>Git deploy</h3><p>Push from the laptop to the server's bare repo and the code updates itself.</p></div>
+    <div class="item"><h3>Public links <span class="pill">Funnel</span></h3><p>Viewer on <code>https://…ts.net</code>, API on port <code>8443</code>; each needs its login or key.</p></div>
+    <div class="item"><h3>Git deploy</h3><p>Push from the laptop to the server's bare repo and its working copy updates itself.</p></div>
+    <div class="item"><h3>Network blocks <span class="pill bad">office Wi-Fi</span></h3><p>For minutes at a time the network refuses every new connection and name lookup. Connections already open keep working, so the programs keep theirs open (see §8).</p></div>
+    <div class="item"><h3>No VPN <span class="pill">since 3 Nov</span></h3><p>Cloudflare WARP was tried for Polymarket and dropped: Polymarket answers directly, and the tunnel broke during every block (see Decisions).</p></div>
   </div>
 </section>
 
-<!-- 3 ------------------------------------------------------------------->
 <section>
   <h2><span class="n">3</span>The programs</h2>
-  <p class="sub">Each one starts, stops and restarts on its own — none waits for another.</p>
+  <p class="sub">Each one starts, stops and restarts on its own; none waits for another. Logs in <code>~/logs/&lt;program&gt;.log</code>.</p>
   <div class="grid">
-    <div class="item"><h3>discover.py <span class="pill">every 15 min</span></h3><p>Lists every open market, imports newly closed ones, deletes those over 30 days old.</p></div>
-    <div class="item"><h3>activity.py <span class="pill">after each scan</span></h3><p>Turns each scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
-    <div class="item"><h3>live.py <span class="pill">every minute</span></h3><p>Fetches new candles for hot markets, then for any market that traded since.</p></div>
-    <div class="item"><h3>backfill.py <span class="pill warm">running</span></h3><p>Fills old history on leftover budget, reports coverage, checks candles against volumes, repairs.</p></div>
-    <div class="item"><h3>viewer.py <span class="pill">always on</span></h3><p>The browser viewer behind a login, with related-wording and nearby-market panels; <code>/status</code> charts API use, the budget and the backfill.</p></div>
-    <div class="item"><h3>api/ <span class="pill">always on</span></h3><p>The data API for Python: markets, candles, and backfill on demand — see the API tab.</p></div>
+    <div class="item"><h3>discover.py <span class="pill cold">every 15 min</span></h3><p>Lists every open market on both venues (each in its own thread), imports newly closed ones, deletes those past 30 days.</p></div>
+    <div class="item"><h3>activity.py <span class="pill warm">after each scan</span></h3><p>Turns each Kalshi scan's volumes into busy-ness scores and picks the hot list (~3 s).</p></div>
+    <div class="item"><h3>live.py <span class="pill hot">every minute</span></h3><p>Kalshi: new candles for hot markets, then any market that traded since.</p></div>
+    <div class="item"><h3>trades.py <span class="pill hot">every 15 s</span></h3><p>Polymarket: reads the feed of every trade on the venue; after a gap, catches up the markets that traded in it.</p></div>
+    <div class="item"><h3>aggregate.py <span class="pill hot">always</span></h3><p>Polymarket: makes one-minute candles from the stored trades, only for minutes that changed.</p></div>
+    <div class="item"><h3>backfill.py <span class="pill">always</span></h3><p>History on both venues on leftover budget; <code>--report</code>, <code>--verify</code>, <code>--refetch</code>.</p></div>
+    <div class="item"><h3>match.py <span class="pill">every 10 min</span></h3><p>One structured record per market and a vector per question template, for the similar-markets search.</p></div>
+    <div class="item"><h3>check.py <span class="pill">5 min · daily</span></h3><p>A watchdog every 5 minutes that pushes to your phone the moment something needs action, and the full data check every day at 09:00 UTC.</p></div>
+    <div class="item"><h3>api/ <span class="pill ok">4 processes</span></h3><p>The data API for Python: both venues, one shape (API tab).</p></div>
+    <div class="item"><h3>viewer.py <span class="pill ok">always</span></h3><p>Browser viewer behind a login, light or dark: tables, related wording, nearby markets, charts, manage, <code>/status</code>, <code>/docs</code> (this page).</p></div>
   </div>
 </section>
 
-<!-- 4 ------------------------------------------------------------------->
 <section>
   <h2><span class="n">4</span>Where the data lives</h2>
-  <p class="sub">Every fact in one table, each linked to the one above it.</p>
-  <div class="fig">
-    <svg viewBox="0 0 900 250" role="img" aria-label="Kalshi chain series, events, markets, candles; Polymarket events, markets, candles">
-      <defs>
-        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
-        </marker>
-      </defs>
-      <text x="20" y="30" font-size="13" font-weight="700" fill="var(--kalshi)" letter-spacing="1">KALSHI</text>
-      <g font-size="15" font-weight="700">
-        <rect x="20" y="45" width="180" height="60" rx="14" fill="var(--kalshi-soft)"/>
-        <text x="110" y="72" text-anchor="middle" fill="var(--ink)">series</text>
-        <text x="110" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">repeating template</text>
-        <rect x="245" y="45" width="180" height="60" rx="14" fill="var(--kalshi-soft)"/>
-        <text x="335" y="72" text-anchor="middle" fill="var(--ink)">events</text>
-        <text x="335" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">one instance of it</text>
-        <rect x="470" y="45" width="180" height="60" rx="14" fill="var(--kalshi-soft)"/>
-        <text x="560" y="72" text-anchor="middle" fill="var(--ink)">markets</text>
-        <text x="560" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">one yes/no contract</text>
-        <rect x="695" y="45" width="185" height="60" rx="14" fill="var(--kalshi-soft)"/>
-        <text x="787" y="72" text-anchor="middle" fill="var(--ink)">candles</text>
-        <text x="787" y="92" text-anchor="middle" font-size="12" font-weight="400" fill="var(--muted)">traded minutes only</text>
-      </g>
-      <path d="M200 75 H243" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-      <path d="M425 75 H468" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-      <path d="M650 75 H693" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-      <!-- tracking hangs off markets -->
-      <path d="M560 105 V140" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-      <rect x="470" y="142" width="180" height="40" rx="12" fill="var(--warm-soft)"/>
-      <text x="560" y="167" text-anchor="middle" font-size="14" font-weight="700" fill="var(--warm)">tracking</text>
-      <text x="30" y="170" font-size="13" fill="var(--muted)">rolled up automatically →</text>
-      <g font-size="13" font-weight="600">
-        <rect x="695" y="125" width="56" height="30" rx="9" fill="var(--soft)"/><text x="723" y="145" text-anchor="middle" fill="var(--ink)">5m</text>
-        <rect x="759" y="125" width="56" height="30" rx="9" fill="var(--soft)"/><text x="787" y="145" text-anchor="middle" fill="var(--ink)">15m</text>
-        <rect x="823" y="125" width="56" height="30" rx="9" fill="var(--soft)"/><text x="851" y="145" text-anchor="middle" fill="var(--ink)">1h</text>
-      </g>
-      <path d="M787 105 V123" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-      <text x="20" y="215" font-size="13" font-weight="700" fill="var(--muted)" letter-spacing="1">POLYMARKET</text>
-      <g font-size="14" fill="var(--muted)">
-        <rect x="245" y="198" width="180" height="40" rx="12" fill="var(--soft)"/><text x="335" y="223" text-anchor="middle">events</text>
-        <rect x="470" y="198" width="180" height="40" rx="12" fill="var(--soft)"/><text x="560" y="223" text-anchor="middle">markets</text>
-        <rect x="695" y="198" width="185" height="40" rx="12" fill="var(--soft)"/><text x="787" y="223" text-anchor="middle">candles</text>
-      </g>
-      <path d="M425 218 H468" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-      <path d="M650 218 H693" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
-    </svg>
-  </div>
-  <div class="tablecard" style="margin-top:14px">
-    <table>
-      <tr><th>Table</th><th>What it holds</th></tr>
-      <tr><td><code>kalshi_markets</code></td><td>Every market open now or closed in the last 30 days, exactly as Kalshi sends it.</td></tr>
-      <tr><td><code>kalshi_candles</code></td><td>One row per market per minute <i>with a trade</i>; quiet minutes are filled in when read.</td></tr>
-      <tr><td><code>kalshi_tracking</code></td><td>Per market: last volume, when it was read, activity score, and which minutes are fetched.</td></tr>
-      <tr><td><code>kalshi_scans</code></td><td>One row per discovery scan, so activity.py scores each exactly once.</td></tr>
-      <tr><td><code>kalshi_observations</code></td><td>Hand-off from discover to activity: each market's volume and when it was true.</td></tr>
-      <tr><td><code>kalshi_titles</code></td><td>Each distinct market title once (572k for 2.9M markets), for the related-wording search.</td></tr>
-      <tr><td><code>*_5m / *_15m / *_1h</code></td><td>TimescaleDB rollups that refresh themselves and include the newest minutes.</td></tr>
-    </table>
-  </div>
+  <p class="sub">PostgreSQL with TimescaleDB (candles and trades as hypertables, compressed after 2 days) and pgvector.</p>
+  <div class="tablecard"><table>
+    <tr><th>Table</th><th>What it holds</th></tr>
+    <tr><td>kalshi_markets · events · series</td><td>Every Kalshi market open now or closed in the last 30 days, exactly as Kalshi sends it, linked series → event → market.</td></tr>
+    <tr><td>kalshi_candles</td><td>One row per market per minute with a trade; quiet minutes are filled in when read, never stored.</td></tr>
+    <tr><td>kalshi_tracking · scans · observations</td><td>Per market: last volume, activity score, which minutes are fetched; one row per scan for activity.py.</td></tr>
+    <tr><td>poly_markets · poly_events</td><td>Every Polymarket market and event in the same window, with the raw listing.</td></tr>
+    <tr><td>poly_trades</td><td>Every Polymarket trade: time, outcome token, side, price, size, taker's wallet, transaction. Id = md5 of (transaction, token, wallet, side, size, price).</td></tr>
+    <tr><td>poly_candles</td><td>One row per market per minute with a trade, made from poly_trades: price of the first outcome, volume in shares, notional in USDC, trade count.</td></tr>
+    <tr><td>poly_tracking · poly_feed · poly_dirty</td><td>Bookkeeping, hidden in the viewer. poly_tracking: per market, the stretch whose every trade is stored, so nothing is read twice or missed. poly_feed: how far the feed of all trades has read, kept once so 1.6M rows don't move every 15 s. poly_dirty: minutes that just got trades and wait for aggregate.py to make their candle.</td></tr>
+    <tr><td>propositions</td><td>One record per market, both venues: kind, subject, entity, comparator, low/high, unit, when, the masked template, where each field came from.</td></tr>
+    <tr><td>templates</td><td>One 384-number vector per distinct template, with four flags (Kalshi/Polymarket × open/closed), each with its own HNSW index.</td></tr>
+    <tr><td>kalshi_candle_counts · poly_candle_counts</td><td>Each market's candle count and first/last candle, refreshed by the viewer every 10 minutes for its manage and visualise pages.</td></tr>
+    <tr><td>*_5m · *_15m · *_1h</td><td>TimescaleDB rollups that refresh themselves and include the newest minutes.</td></tr>
+    <tr><td>api_keys · api_requests · api_jobs</td><td>Hashed keys, every request (for the usage page), pushed backfill jobs.</td></tr>
+  </table></div>
 </section>
 
-<!-- 5 ------------------------------------------------------------------->
 <section>
-  <h2><span class="n">5</span>How live candles work</h2>
+  <h2><span class="n">5</span>Kalshi: live candles</h2>
   <p class="sub">Spend requests only where trades are happening.</p>
-  <div class="fig">
-    <svg viewBox="0 0 900 300" role="img" aria-label="Scan reads volumes, activity scores them, markets are sorted into hot, warm and cold">
+  <div class="fig"><svg viewBox="0 0 900 300" role="img" aria-label="Scan reads volumes, activity scores them, markets are sorted into hot, warm and cold">
       <defs>
         <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
           <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
@@ -327,12 +299,11 @@
       <rect x="490" y="208" width="390" height="72" rx="16" fill="var(--cold-soft)"/>
       <text x="512" y="238" font-size="16" font-weight="700" fill="var(--cold)">COLD · volume unchanged</text>
       <text x="512" y="262" font-size="13" fill="var(--ink)">no request at all — marked complete for free</text>
-    </svg>
-  </div>
+    </svg></div>
   <div class="formula">
-    <span class="c">new market</span>     score = total volume ÷ minutes since it opened<br>
-    <span class="c">every scan</span>     rate  = Δvolume ÷ Δminutes<br>
-    <span class="c">          </span>     score = score + (1 − 2<sup>−Δminutes/60</sup>) × (rate − score)   <span class="c">← one-hour half-life</span>
+    <span class="c">new market</span>  score = total volume ÷ minutes since it opened<br>
+    <span class="c">every scan</span>  rate = Δvolume ÷ Δminutes<br>
+    score = score + (1 − 2<sup>−Δminutes/60</sup>) × (rate − score)   <span class="c">← one-hour half-life</span>
   </div>
   <div class="grid" style="margin-top:14px">
     <div class="item"><h3>Trades only</h3><p>Minutes with quotes but no trade are dropped; nothing is invented.</p></div>
@@ -342,12 +313,67 @@
   </div>
 </section>
 
-<!-- 6 ------------------------------------------------------------------->
 <section>
-  <h2><span class="n">6</span>Staying inside Kalshi's limit</h2>
-  <p class="sub">One bucket of request tokens in Redis; every program draws from it.</p>
-  <div class="fig">
-    <svg viewBox="0 0 900 230" role="img" aria-label="A token bucket shared by discover, live hot, live warm and backfill, in priority order">
+  <h2><span class="n">6</span>Polymarket: every trade, and candles made from them</h2>
+  <p class="sub">Polymarket has no candle API (its price history is a sampled order-book midpoint), so candles are made here from its trades.</p>
+  <div class="fig"><svg viewBox="0 0 900 300" role="img" aria-label="Polymarket trades flow from the v2 API through trades.py and backfill.py into poly_trades, marked minutes go to aggregate.py, which writes poly_candles">
+      <defs>
+        <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+      <rect x="10" y="100" width="150" height="100" rx="16" fill="var(--poly-soft)" stroke="var(--poly)" stroke-width="2"/>
+      <text x="85" y="140" text-anchor="middle" font-size="16" font-weight="700" fill="var(--poly)">/v2/trades</text>
+      <text x="85" y="162" text-anchor="middle" font-size="12" fill="var(--muted)">1,000 a page</text>
+      <text x="85" y="180" text-anchor="middle" font-size="12" fill="var(--muted)">then by cursor</text>
+      <g font-size="14">
+        <rect x="220" y="20" width="200" height="74" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="236" y="44" font-weight="700" fill="var(--ink)">feed · every 15 s</text>
+        <text x="236" y="64" font-size="12" fill="var(--muted)">every trade on the venue,</text>
+        <text x="236" y="80" font-size="12" fill="var(--muted)">back to where it last reached</text>
+        <rect x="220" y="113" width="200" height="74" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="236" y="137" font-weight="700" fill="var(--ink)">catch-up</text>
+        <text x="236" y="157" font-size="12" fill="var(--muted)">after a gap: markets that</text>
+        <text x="236" y="173" font-size="12" fill="var(--muted)">traded in it, one by one</text>
+        <rect x="220" y="206" width="200" height="74" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+        <text x="236" y="230" font-weight="700" fill="var(--ink)">backfill.py</text>
+        <text x="236" y="250" font-size="12" fill="var(--muted)">each market's whole list,</text>
+        <text x="236" y="266" font-size="12" fill="var(--muted)">stored 50,000 at a time</text>
+      </g>
+      <path d="M160 130 C 190 130, 190 57, 218 57" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M160 150 L 218 150" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M160 170 C 190 170, 190 243, 218 243" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <rect x="490" y="95" width="150" height="110" rx="16" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+      <text x="565" y="128" text-anchor="middle" font-size="15" font-weight="700" fill="var(--db)">poly_trades</text>
+      <text x="565" y="150" text-anchor="middle" font-size="12" fill="var(--muted)">+ poly_dirty</text>
+      <text x="565" y="168" text-anchor="middle" font-size="12" fill="var(--muted)">(minutes to make)</text>
+      <text x="565" y="186" text-anchor="middle" font-size="12" fill="var(--muted)">+ coverage</text>
+      <path d="M420 57 C 460 57, 460 120, 488 125" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M420 150 L 488 150" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M420 243 C 460 243, 460 180, 488 175" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <rect x="690" y="40" width="190" height="64" rx="14" fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+      <text x="706" y="66" font-size="14" font-weight="700" fill="var(--ink)">aggregate.py</text>
+      <text x="706" y="86" font-size="12" fill="var(--muted)">claims marked minutes</text>
+      <rect x="690" y="196" width="190" height="64" rx="14" fill="var(--db-soft)" stroke="var(--db)" stroke-width="2"/>
+      <text x="706" y="222" font-size="14" font-weight="700" fill="var(--db)">poly_candles</text>
+      <text x="706" y="242" font-size="12" fill="var(--muted)">OHLC · shares · USDC · count</text>
+      <path d="M640 130 C 665 130, 665 72, 688 72" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+      <path d="M785 104 L 785 194" fill="none" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr2)"/>
+    </svg></div>
+  <div class="grid" style="margin-top:14px">
+    <div class="item"><h3>Data API v2 <span class="pill ok">since 3 Nov</span></h3><p><code>/v2/trades</code>, taker side only (each fill once). Pages of 1,000 follow a cursor keyed on (time, sequence): pages never overlap or leave holes, and there is no depth limit.</p></div>
+    <div class="item"><h3>The feed</h3><p>Every 15 s, the whole venue's trades back to where the last read reached: about 1,000 trades a minute, one or two requests. Coverage is claimed up to 30 s before its newest trade.</p></div>
+    <div class="item"><h3>Gaps</h3><p>One feed read goes back at most 100,000 trades (~1.5 h). Past that a gap is recorded; markets whose volume rose in it are read one by one.</p></div>
+    <div class="item"><h3>History in batches</h3><p>A market's whole list, newest first, stored and its coverage recorded every 50,000 trades: any market is read in full, and a failure keeps what was stored.</p></div>
+    <div class="item"><h3>Separate aggregator</h3><p>Writers mark the minutes they add trades to; aggregate.py claims marked minutes first, then reads their trades, so it never misses one committed mid-way.</p></div>
+    <div class="item"><h3>Same ids as v1</h3><p>Trades read through v1 and v2 hash to the same id (checked one by one on stored markets), so the switch stored nothing twice.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">7</span>Staying inside the limits</h2>
+  <p class="sub">One bucket of request tokens per venue in Redis; every program draws from it, by priority.</p>
+  <div class="fig"><svg viewBox="0 0 900 230" role="img" aria-label="A token bucket shared by discover, live hot, live warm and backfill, in priority order">
       <path d="M60 40 V170 a20 20 0 0 0 20 20 H260 a20 20 0 0 0 20 -20 V40" fill="none" stroke="var(--ink)" stroke-width="3"/>
       <rect x="64" y="95" width="212" height="91" rx="14" fill="var(--accent-soft)"/>
       <text x="170" y="138" text-anchor="middle" font-size="16" font-weight="700" fill="var(--accent)">240 tokens / min</text>
@@ -369,138 +395,156 @@
       <text x="760" y="110" text-anchor="middle" font-size="14" fill="var(--ink)">budget halves for everyone</text>
       <text x="760" y="134" text-anchor="middle" font-size="14" fill="var(--ink)">+10% back per quiet 10 min</text>
       <text x="760" y="166" text-anchor="middle" font-size="13" fill="var(--muted)">Redis down → each takes ⅓</text>
-    </svg>
+    </svg></div>
+  <div class="grid" style="margin-top:14px">
+    <div class="item"><h3>Kalshi: 240 a minute</h3><p>No 60-second window can exceed it however many programs run; at most 15 a second. Hot list size follows the budget.</p></div>
+    <div class="item"><h3>Polymarket: 300 a minute</h3><p>Its own bucket, same rules, at most 8 a second. Polymarket allows 300 per 10 s on <code>/v2/trades</code>, so there is room to raise it.</p></div>
+    <div class="item"><h3>429 halves it</h3><p>A throttle from either venue halves that venue's budget for every program at once; it recovers slowly.</p></div>
+    <div class="item"><h3>Priorities</h3><p>hot (live, the feed) → warm (catch-up, pushed backfills) → backfill, on what is left.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">8</span>Similar markets</h2>
+  <p class="sub">Every market becomes the same record; a vector finds the nearest wording, the fields measure the rest. Nothing is stored about pairs: a search runs when asked.</p>
+  <div class="tablecard"><table>
+    <tr><th>Step</th><th>What happens</th></tr>
+    <tr><td>Record</td><td>propositions.py reads each market: native fields first (Kalshi's strike type, floor and cap, outcome names; Polymarket's group item), regex for the rest (comparators, numbers like $70k or 300-400k, dates, placeholders).</td></tr>
+    <tr><td>Mask</td><td>Numbers, dates, comparators and the named outcome become slots: "Bitcoin above ⟨x⟩ on ⟨date⟩". A whole price ladder shares one template.</td></tr>
+    <tr><td>Embed</td><td>Each distinct template once, with bge-small-en-v1.5 (384 numbers) on the CPU; new templates every 10 minutes, open markets first.</td></tr>
+    <tr><td>Search</td><td>The template's nearest neighbours by cosine distance from the HNSW index of each slice asked for (venue × open/closed), then every market behind them.</td></tr>
+    <tr><td>Measure</td><td>text (cosine), days between the dates the questions turn on, level (relative gap between thresholds), opposite (above vs below).</td></tr>
+    <tr><td>Label</td><td>relate.py reads the pair: identical, complement, nested, overlapping, same_outcome or related. A reading aid; it filters nothing.</td></tr>
+  </table></div>
+  <div class="formula">
+    distance = text + 0.10 × min(days, 730) / 365 + 0.50 × min(level, 1) + 0.05 × opposite<br>
+    <span class="c">limits: max_cosine (default 0.3), max_days, max_level · gates: subject, keywords</span>
   </div>
   <div class="grid" style="margin-top:14px">
-    <div class="item"><h3>Hard ceiling</h3><p>No 60-second window can ever exceed the budget, however many programs run.</p></div>
-    <div class="item"><h3>Hot cap</h3><p>Hot list size = 100 × (budget − headroom − discovery − warm), recomputed every scan.</p></div>
-    <div class="item"><h3>Batch candles</h3><p>Up to 100 markets and 10,000 market-minutes per request, packed automatically.</p></div>
+    <div class="item"><h3>Why embeddings</h3><p>"BTC" and "Bitcoin", "Fed cuts" and "FOMC lowers" are far apart in letters and close in meaning.</p></div>
+    <div class="item"><h3>Why not only embeddings</h3><p>They score "above $70k" and "below $70k" about 0.98 alike, so comparators and numbers are kept out of the vector and measured from the fields.</p></div>
+    <div class="item"><h3>No language model, no training</h3><p>Regex reads ~98% of real Polymarket questions; an off-the-shelf model is enough until thousands of confirmed matches exist to learn from.</p></div>
   </div>
 </section>
 
-<!-- 7 ------------------------------------------------------------------->
 <section>
-  <h2><span class="n">7</span>When things go wrong</h2>
-  <p class="sub">Everything is saved as it arrives, and the bookkeeping only moves once data is written, so nothing is lost or fetched twice.</p>
-  <div class="tablecard">
-    <table>
-      <tr><th>What happens</th><th>What the system does</th></tr>
-      <tr><td>A program crashes</td><td>Restarts and carries on from the bookkeeping; nothing lost, nothing doubled.</td></tr>
-      <tr><td>Network drops out</td><td>Every request pauses; one check every 30 s; all carry on from where they were as soon as it is back.</td></tr>
-      <tr><td>Network refuses new connections</td><td>Programs keep working on connections already open, so don't restart them until it lifts.</td></tr>
-      <tr><td>Two writers on the same rows</td><td>Every writer locks bookkeeping rows in ticker order, so they queue instead of deadlocking.</td></tr>
-      <tr><td>Kalshi throttles</td><td>Budget halves for everyone at once, then recovers slowly.</td></tr>
-      <tr><td>Discovery stops mid-scan</td><td>Saves its place after every page and finishes the same scan from there.</td></tr>
-      <tr><td>activity.py is down</td><td>Scans wait in order and are scored one by one when it returns.</td></tr>
-      <tr><td>Redis is down</td><td>Each program falls back to a third of the budget; live works out the hot list itself.</td></tr>
-      <tr><td>Server off for days</td><td>Discovery re-imports the closed markets; live catches up; backfill fills the rest.</td></tr>
-    </table>
+  <h2><span class="n">9</span>The daily check</h2>
+  <p class="sub">check.py, at 09:00 UTC (the quietest hour on both venues), over the day before. Each check is ok, warn or fail.</p>
+  <div class="tablecard"><table>
+    <tr><th>Check</th><th>What it looks at</th></tr>
+    <tr><td>freshness</td><td>Kalshi live and the Polymarket feed are current (warn past 5 and 10 minutes behind); the candle backlog is small (warn past 50,000 minutes waiting).</td></tr>
+    <tr><td>programs</td><td>Every program is running.</td></tr>
+    <tr><td>kalshi_sample</td><td>12 of yesterday's Kalshi markets downloaded again: every traded minute stored, with Kalshi's own numbers.</td></tr>
+    <tr><td>poly_sample</td><td>12 of yesterday's Polymarket markets read again: every trade stored, under the same id.</td></tr>
+    <tr><td>poly_candles</td><td>50 markets' candles made again from the stored trades: open, high, low, close, volume, notional and count all equal.</td></tr>
+    <tr><td>sanity</td><td>Prices outside 0–1, high below low, empty volume, candles in the future or after a market closed.</td></tr>
+    <tr><td>venue_api</td><td>What the venues answered: HTTP 4xx (410 = an endpoint retired, a fail), deprecation headers, trades missing fields the code needs.</td></tr>
+    <tr><td>gaps</td><td>Minutes Kalshi was unreachable or live fell 10 minutes behind; Polymarket feed gaps.</td></tr>
+    <tr><td>progress</td><td>History left on each venue, against the day before: warns if it stops moving.</td></tr>
+    <tr><td>matching</td><td>Open markets without a record; templates without a vector.</td></tr>
+    <tr><td>api · disk</td><td>Server errors and slow answers; free space, growth a day and days until full.</td></tr>
+  </table></div>
+  <div class="tablecard" style="margin-top:14px"><table>
+    <tr><th>Watchdog, every 5 min</th><th>Pushes at once when</th></tr>
+    <tr><td>programs</td><td>A program is not running.</td></tr>
+    <tr><td>kalshi_live · poly_feed</td><td>Kalshi live more than 15 minutes behind; the Polymarket feed more than 30.</td></tr>
+    <tr><td>aggregate · disk</td><td>Over 50,000 minutes waiting for their candle and not going down; under 10% of the disk free.</td></tr>
+    <tr><td>venue_api</td><td>A venue answers 410, sends a deprecation notice, or leaves out a field the code needs.</td></tr>
+  </table></div>
+  <p class="sub" style="margin:10px 0 0">Again every 6 hours while a problem lasts, and once more when it clears. Pushes the network blocks are sent on a later round.</p>
+  <div class="grid" style="margin-top:14px">
+    <div class="item"><h3>Stored</h3><p>One row per check per run in <code>checks</code>, so the history is kept.</p></div>
+    <div class="item"><h3>Shown</h3><p>The newest run on the viewer's <code>/status</code>, and at <code>GET /v1/checks</code> (<code>pm.checks()</code>).</p></div>
+    <div class="item"><h3>Pushed</h3><p>To your phone through ntfy: failures first, title "all OK" or how many failed. Retried every 5 minutes while the network blocks.</p></div>
   </div>
 </section>
 
-<!-- 8 ------------------------------------------------------------------->
-<section id="tests">
-  <h2><span class="n">8</span>Tested</h2>
-  <p class="sub">Against a simulated Kalshi with known trades, so every candle can be checked exactly.</p>
-  <ul class="check">
-    <li class="done">Activity rules, case by case<span>11 cases: new, closed, quiet chains, late coverage, averages, odd readings — all pass.</span></li>
-    <li class="done">Shared budget under three processes<span>Busiest 60 s held exactly 120 of 120; after a 429 the rate halved; hot always went first.</span></li>
-    <li class="done">Database upgrade<span>Old layout with <code>filled</code> upgraded in place; candles kept; rollups rebuilt.</span></li>
-    <li class="done" id="e2e">30-minute end-to-end run with faults<span>Crashes, a network drop, 429s, Redis loss, a half scan and slow answers: 57,303 traded minutes all exactly right — 0 missing, 0 wrong, 0 extra; budget held; busiest markets all hot.</span></li>
-    <li class="done">Real Kalshi<span>13 settled markets: candle volumes add up exactly to Kalshi's own volume; 7,709 quote-only minutes dropped.</span></li>
-    <li class="done">Stress test, 1 Nov<span>8M candles, 100 clients, 1,000 pushes, faults under load, collectors at 10×: 7 faults found and fixed. <a href="https://claude.ai/artifact/4m2kCnAYLPQGXCc2ddr7Lo">Report</a></span></li>
-    <li class="done">Viewer panels<span>Related wording matches scoring every market (84 cases); expiry and odds filters exact; first load 0.5 s, slider 0.02 s.</span></li>
-  </ul>
+<section>
+  <h2><span class="n">10</span>When things go wrong</h2>
+  <p class="sub">Everything is saved as it arrives, and bookkeeping only moves once data is written: nothing lost, nothing fetched twice.</p>
+  <div class="tablecard"><table>
+    <tr><th>What happens</th><th>What the system does</th></tr>
+    <tr><td>A program crashes</td><td>Restarts and carries on from the bookkeeping.</td></tr>
+    <tr><td>Network refuses new connections</td><td>Programs keep working on connections already open; requests that need a new one wait, one check every 30 s.</td></tr>
+    <tr><td>Polymarket feed falls behind</td><td>The gap is recorded; markets that traded in it are caught up one by one; the feed starts again from now.</td></tr>
+    <tr><td>A venue changes its API</td><td>Requests answer 4xx and the log says so; the daily check fails on any 410, any deprecation notice and any trade missing a field. Polymarket retired v1 on 2 Nov and it went unnoticed for 6 hours.</td></tr>
+    <tr><td>Two writers on the same rows</td><td>Every writer locks bookkeeping rows in key order, so they queue instead of deadlocking.</td></tr>
+    <tr><td>A venue throttles</td><td>That venue's budget halves for everyone at once, then recovers slowly.</td></tr>
+    <tr><td>Discovery stops mid-scan</td><td>Saves its place after every page and finishes the same scan from there.</td></tr>
+    <tr><td>Redis is down</td><td>Each program falls back to a third of the budget; live works out the hot list itself.</td></tr>
+    <tr><td>Server off for days</td><td>Discovery re-imports closed markets; live and the feed catch up; backfill fills the rest.</td></tr>
+  </table></div>
 </section>
 
-<!-- 9 ------------------------------------------------------------------->
 <section>
-  <h2><span class="n">9</span>Still to do</h2>
+  <h2><span class="n">11</span>Tested</h2>
+  <p class="sub">Against simulated venues whose every trade is known, so every stored trade and candle can be checked exactly.</p>
+  <div class="tablecard"><table>
+    <tr><th>Test</th><th>Result</th></tr>
+    <tr><td>Kalshi end to end, 30 min with faults</td><td>Crashes, a network drop, 429s, Redis loss, a half scan: 57,303 traded minutes, 0 missing, 0 wrong, 0 extra.</td></tr>
+    <tr><td>Real Kalshi</td><td>13 settled markets: candle volumes add up exactly to Kalshi's own.</td></tr>
+    <tr><td>Stress test, 1 Nov</td><td>8M candles, 100 clients, 1,000 pushes, faults under load: 7 faults found and fixed.</td></tr>
+    <tr><td>Polymarket v2, 3 Nov</td><td>1.1M trades through outages, crashes and throttling: 0 missing, 0 wrong; 210,546 candles, 0 wrong; every market caught up after each gap; the busiest read whole in batches; load 147 requests/s, 0 errors.</td></tr>
+    <tr><td>v2 against stored v1 trades</td><td>Three real markets read again: every stored trade found under the same id, nothing stored twice.</td></tr>
+    <tr><td>First daily check, 3 Nov</td><td>12 Kalshi markets downloaded again: 0 minutes missing, 0 different. 12 Polymarket markets read again: 0 trades missing. 679 candle-minutes made again from trades: 0 different. Nothing impossible. It also caught Polymarket's deprecation of gamma's /markets.</td></tr>
+    <tr><td>Wording vs vectors</td><td>20 real markets side by side (<code>docs/wording-vs-vectors-2026-11-03.html</code>): vectors better for the same bet worded differently, wording better for named outcomes (see Decisions).</td></tr>
+    <tr><td>Similar markets</td><td>21 of 21 checks: slices, limits, gates, labels, one-cent strikes, ladders.</td></tr>
+    <tr><td>Viewer</td><td>Related wording, expiry and odds filters exact; manage page from 12–39 s to 0.05–0.6 s; related-wording panel from 5–14 s to 1.4–2 s.</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2><span class="n">12</span>Still to do</h2>
   <p class="sub">In rough order.</p>
   <ul class="check">
-    <li class="done">Switch the server to the new programs<span>discover, activity, live and viewer running in tmux since 31 Oct.</span></li>
-    <li class="todo">Install them as services <span class="pill warm">ready</span><span>One command: <code>sudo bash deploy/install-services.sh</code>, run while Kalshi is reachable.</span></li>
-    <li class="todo">First full backfill <span class="pill warm">running since 1 Nov</span><span>~792,000 markets, 3.8 billion market-minutes, on leftover budget; never-traded markets cost nothing.</span></li>
+    <li class="todo">Subscribe to the daily check<span>Install the ntfy app and subscribe to the topic in the server's <code>.env</code> (<code>NTFY_TOPIC</code>).</span></li>
+    <li class="todo">Install the programs as services<span>One command, <code>sudo bash deploy/install-services.sh</code>: all ten start on boot and restart on a crash (they run in tmux now, so a reboot or power cut stops them), and the logs are rotated.</span></li>
+    <li class="todo">Backups<span>Nothing is backed up yet; where they go is still to be decided.</span></li>
+    <li class="todo">Reliable internet<span>The office network's blocks stall new connections; a 4G/5G router would end them.</span></li>
     <li class="todo">Harden access<span>Turn off SSH passwords; turn off Tailscale key expiry for the server.</span></li>
-    <li class="todo">Reliable internet<span>Office Wi-Fi blocks lookups and drops out; a 4G/5G router or registered network would fix it.</span></li>
-    <li class="done">Fill-on-read for quiet minutes<span>The API carries the last price forward, only where every trade is known.</span></li>
-    <li class="done">The API<span>Markets, candles in three formats, the backfill push, keys and limits.</span></li>
-    <li class="done">Viewer panels<span>Related wording (title similarity, slider) and nearby markets by expiry or odds are back.</span></li>
-    <li class="todo">Strike <span class="pill">on hold</span><span>Whether to derive a strike from each market is still being decided.</span></li>
-    <li class="todo">Backups, Polymarket<span>Polymarket is blocked on this network; its tables wait.</span></li>
+    <li class="todo">Drop the <code>filled</code> candle column<span>Redundant with volume = 0; waiting for your go.</span></li>
+    <li class="todo">History backfill<span>Kalshi 492,358 markets and Polymarket 411,211 still to fetch (3 Nov), on leftover budget; the daily check reports the pace.</span></li>
+    <li class="todo">Named outcomes in the vector ranking<span>Put the masked name back into the distance (same person or team first, prefix matching for Kalshi's "Los Angeles R"); then a vector "similar markets" panel in the viewer.</span></li>
+    <li class="todo">Strike on hold<span>Whether to derive a strike for every market is still open.</span></li>
   </ul>
 </section>
 
-<!-- 10 ------------------------------------------------------------------>
-<section>
-  <h2><span class="n">10</span>Decisions we made</h2>
-  <p class="sub">The short reason behind each choice.</p>
-  <div class="tablecard">
-    <table>
-      <tr><th>Decision</th><th>Why</th></tr>
-      <tr><td>1-minute candles</td><td>Kalshi's own resolution; 5-second polling broke the rate limit.</td></tr>
-      <tr><td>Only traded minutes</td><td>Storing empty minutes would cost ~260 million rows a day for nothing.</td></tr>
-      <tr><td>30-day window</td><td>Markets open now or closed in the last 30 days; older ones are deleted.</td></tr>
-      <tr><td>Venue data only</td><td>Columns for derived data exist but stay empty until we fill them.</td></tr>
-      <tr><td>No copied columns</td><td>A market's category and series are read from its event, not duplicated.</td></tr>
-      <tr><td>Scores in PostgreSQL</td><td>One statement scores 185k markets in about 3 s — no need for Rust or C++.</td></tr>
-      <tr><td>Separate programs</td><td>Each can be stopped, restarted or rerun as a data fixer on its own.</td></tr>
-      <tr><td>REST, not WebSocket</td><td>The WebSocket needs an API key; REST with a budget covers it for now.</td></tr>
-      <tr><td>No Redis buffer</td><td>PostgreSQL is on the same machine; outages are to Kalshi, so there is nothing to buffer.</td></tr>
-      <tr><td>API shaped like Alpaca</td><td>Clean request shape, Binance's interval names, Zerodha's files: everything loads into pandas.</td></tr>
-      <tr><td>Fill when read</td><td>Forward fill is worked out per request, so storage stays traded minutes only.</td></tr>
-      <tr><td>Intervals from 1-minute rows</td><td>Always matches what is stored, even right after a backfill; the rollups can lag 30 min.</td></tr>
-      <tr><td>Nearby: expiry and odds only</td><td>A strike depends on how a title is worded; expiry and price do not.</td></tr>
-      <tr><td>Prices worked out when read</td><td>Newest candle if newer than the listing, else the listing's last price — nothing extra stored.</td></tr>
-      <tr><td>API as 4 processes</td><td>One Python process tops out near 40 requests a second; four reach about 100.</td></tr>
-      <tr><td>Jobs held by a lease</td><td>A running backfill job has a heartbeat; any API process takes over one whose heartbeat stops.</td></tr>
-      <tr><td>Pushed backfills batched</td><td>Up to 100 queued jobs share each Kalshi request: 1,055 jobs took 146 requests.</td></tr>
-      <tr><td>Per-second cap on the budget</td><td>Kalshi counts per second; at most 15 a second, so raising the budget can't trip it.</td></tr>
-      <tr><td>Usage history in plain files</td><td>One JSON line a minute (~100 bytes) in <code>data/state/monitor/</code>, apart from the database.</td></tr>
-      <tr><td>Related wording over distinct titles</td><td>Nearest titles first, then each one's busiest market: 0.5 s instead of 6 s.</td></tr>
-    </table>
-  </div>
-</section>
+</div>
 
-</div><!-- architecture -->
+<div class="tab" id="api">
 
-<div class="tab" id="api" role="tabpanel">
-
-<!-- A1 ------------------------------------------------------------------>
 <section>
   <h2><span class="n">1</span>Start here</h2>
-  <p class="sub">One address, one key, and everything comes back ready for pandas.</p>
+  <p class="sub">One address, one key, both venues, and everything comes back ready for pandas.</p>
   <div class="two">
     <div class="card">
-      <p class="label">Address</p>
-      <p style="margin:0 0 14px"><code>https://theonealpha.tail947e08.ts.net:8443</code></p>
-      <p class="label">Key</p>
-      <p style="margin:0 0 14px">Every request sends <code>X-API-Key: pm_…</code> — only <code>/health</code> works without one.</p>
-      <p class="label">Make a key (on the server)</p>
-      <pre>python -m api.keys create laptop
+      <p class="label">Address</p><p><code>https://theonealpha.tail947e08.ts.net:8443</code></p>
+      <p class="label" style="margin-top:14px">Key</p><p>Every request sends <code>X-API-Key: pm_…</code>; only <code>/health</code> works without one.</p>
+      <p class="label" style="margin-top:14px">Make a key (on the server)</p>
+<pre>python -m api.keys create laptop
 python -m api.keys create notebook --read-only
 python -m api.keys list · revoke NAME</pre>
     </div>
     <div class="card">
       <p class="label">Python, with pmapi.py</p>
-      <pre><span class="c"># copy pmapi.py next to your notebook</span>
+<pre><span class="c"># copy pmapi.py next to your notebook</span>
 from pmapi import Client
-pm = Client(url, key)   <span class="c"># or PM_API_URL / PM_API_KEY</span>
-
-pm.markets(q="bitcoin", status="open")
+pm = Client(url, key)      <span class="c"># or PM_API_URL / PM_API_KEY</span>
+pm.markets(q="bitcoin", venue="all", limit=500)
 pm.candles("KXBTCD-…", "5m", start="2026-10-25")
-pm.closes(["A", "B"], "1h")   <span class="c"># one column each</span>
+pm.candles("0x896c…", "1h")          <span class="c"># Polymarket</span>
+pm.trades("0x896c…")                <span class="c"># its every trade</span>
+pm.similar("KXBTCD-…", venue="poly")
+pm.closes(["A", "B"], "1h")
 pm.wait(pm.backfill("KXBTCD-…"))</pre>
     </div>
   </div>
 </section>
 
-<!-- A2 ------------------------------------------------------------------>
 <section>
   <h2><span class="n">2</span>How a request travels</h2>
-  <p class="sub">Reads come straight from the database; a backfill goes to Kalshi through the shared budget.</p>
-  <div class="fig">
-    <svg viewBox="0 0 900 270" role="img" aria-label="Your Python reaches the API through Tailscale Funnel; the API checks the key and limit, reads PostgreSQL, and queues backfills that a worker fetches from Kalshi">
+  <p class="sub">Reads come straight from the database; a backfill goes to the venue through that venue's budget.</p>
+  <div class="fig"><svg viewBox="0 0 900 270" role="img" aria-label="Your Python reaches the API through Tailscale Funnel; the API checks the key and limit, reads PostgreSQL, and queues backfills that a worker fetches from Kalshi">
       <defs>
         <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
           <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
@@ -533,42 +577,38 @@ pm.wait(pm.backfill("KXBTCD-…"))</pre>
       <text x="780" y="216" text-anchor="middle" font-size="12" fill="var(--muted)">warm priority · Kalshi</text>
       <path d="M780 168 V96" stroke="var(--hot)" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arr4)"/>
       <text x="790" y="136" font-size="12" fill="var(--hot)">candles</text>
-    </svg>
-  </div>
+    </svg></div>
 </section>
 
-<!-- A3 ------------------------------------------------------------------>
 <section>
   <h2><span class="n">3</span>Every endpoint</h2>
-  <p class="sub">All under <code>/v1</code>. Lists take <code>limit</code>, <code>page_token</code> and <code>format</code>.</p>
-  <div class="tablecard">
-    <table>
-      <tr><th>Endpoint</th><th>What it gives</th></tr>
-      <tr><td><span class="method">GET</span><code>/markets</code></td><td>Search markets: <code>status q series event category tickers closes_after closes_before min_volume sort</code>.</td></tr>
-      <tr><td><span class="method">GET</span><code>/markets/{ticker}</code></td><td>One market in full: rules, event, series, activity score, hot or not, candles held.</td></tr>
-      <tr><td><span class="method">GET</span><code>/markets/{ticker}/candles</code></td><td>Candles for one market, any interval, forward-filled or raw.</td></tr>
-      <tr><td><span class="method">GET</span><code>/candles?tickers=A,B</code></td><td>Up to 100 markets in one long table with a <code>ticker</code> column.</td></tr>
-      <tr><td><span class="method">GET</span><code>/markets/{ticker}/latest</code></td><td>The last trade's candle, plus the market's volume and open interest.</td></tr>
-      <tr><td><span class="method">GET</span><code>/latest?tickers=A,B</code></td><td>The last trade of up to 1,000 markets, in the order asked.</td></tr>
-      <tr><td><span class="method">GET</span><code>/events</code> · <code>/events/{event}</code></td><td>Events with market counts; one event with all its markets.</td></tr>
-      <tr><td><span class="method">GET</span><code>/series</code> · <code>/series/{series}</code></td><td>Series; one series with counts and its latest 100 events.</td></tr>
-      <tr><td><span class="method">GET</span><code>/categories</code></td><td>Every category with series, event, market and open-market counts.</td></tr>
-      <tr><td><span class="method">GET</span><code>/hot</code></td><td>The markets fetched every minute, busiest first.</td></tr>
-      <tr><td><span class="method">GET</span><code>/status</code></td><td>Is Kalshi reachable, how far behind live is, budget in use, last scans, jobs.</td></tr>
-      <tr><td><span class="method post">POST</span><code>/backfill</code></td><td>The push command: download one market's candles again, now.</td></tr>
-      <tr><td><span class="method">GET</span><code>/backfill/{job_id}</code></td><td>How that job is going: queued, running, done or failed, with progress.</td></tr>
-      <tr><td><span class="method">GET</span><code>/health</code></td><td>Database, TimescaleDB and Redis up? No key needed.</td></tr>
-    </table>
-  </div>
-  <p style="color:var(--muted);font-size:14px;margin:12px 4px 0">Interactive docs, with every parameter, at <code>/docs</code>.</p>
+  <p class="sub">All under <code>/v1</code>. A Polymarket market is its condition id (<code>0x…</code>) wherever a ticker goes. Lists take <code>limit</code>, <code>page_token</code> and <code>format</code>.</p>
+  <div class="tablecard"><table>
+    <tr><th>Endpoint</th><th>What it gives</th></tr>
+    <tr><td><span class="method">GET</span>/markets</td><td>Search markets: <code>venue</code> (kalshi, poly, all) <code>status</code> <code>q</code> <code>series</code> <code>event</code> <code>category</code> <code>tag</code> <code>tickers</code> <code>closes_after</code> <code>closes_before</code> <code>min_volume</code> <code>sort</code>.</td></tr>
+    <tr><td><span class="method">GET</span>/markets/{ticker}</td><td>One market in full: rules, event, series, activity, candles held, and its <code>proposition</code> (the structured record the similar search uses).</td></tr>
+    <tr><td><span class="method">GET</span>/markets/{ticker}/candles</td><td>Candles for one market, any interval, forward-filled or raw.</td></tr>
+    <tr><td><span class="method">GET</span>/candles?tickers=A,B</td><td>Up to 100 markets in one long table, venues mixed.</td></tr>
+    <tr><td><span class="method">GET</span>/markets/{ticker}/latest · /latest</td><td>The last trade's candle; up to 1,000 markets in the order asked.</td></tr>
+    <tr><td><span class="method">GET</span>/markets/{ticker}/similar</td><td>The nearest markets on either venue, with the distance and its parts, and how the two relate (§5).</td></tr>
+    <tr><td><span class="method">GET</span>/markets/{condition_id}/trades</td><td>Every stored trade of a Polymarket market, oldest first (§6).</td></tr>
+    <tr><td><span class="method">GET</span>/events · /events/{event}</td><td>Events with market counts, <code>venue=kalshi|poly</code>; one event with all its markets (Kalshi ticker or Polymarket event id).</td></tr>
+    <tr><td><span class="method">GET</span>/series · /series/{series}</td><td>Kalshi series; one series with counts and its latest 100 events.</td></tr>
+    <tr><td><span class="method">GET</span>/categories</td><td>Every category with series, event, market and open-market counts.</td></tr>
+    <tr><td><span class="method">GET</span>/hot</td><td>The Kalshi markets fetched every minute, busiest first.</td></tr>
+    <tr><td><span class="method">GET</span>/checks</td><td>The daily data check's newest runs (<code>runs=</code>): one row per check, ok, warn or fail.</td></tr>
+    <tr><td><span class="method">GET</span>/status</td><td>Both venues: reachable, how far behind, budget in use, Polymarket feed and history progress, last scans, jobs.</td></tr>
+    <tr><td><span class="method post">POST</span>/backfill</td><td>Download one market again now, either venue: Kalshi's candles, or Polymarket's whole trade list.</td></tr>
+    <tr><td><span class="method">GET</span>/backfill · /backfill/{job_id}</td><td>Recent jobs; one job: queued, running, done or failed, with progress.</td></tr>
+    <tr><td><span class="method">GET</span>/health</td><td>Database, TimescaleDB and Redis up? No key needed.</td></tr>
+  </table></div>
+  <p class="sub" style="margin:12px 0 0">Interactive docs, with every parameter, at <code>/docs</code> on the API.</p>
 </section>
 
-<!-- A4 ------------------------------------------------------------------>
 <section>
   <h2><span class="n">4</span>Candles</h2>
-  <p class="sub">Forward fill by default — but only where we know nothing traded.</p>
-  <div class="fig">
-    <svg viewBox="0 0 900 250" role="img" aria-label="A row of minutes: before the first trade no rows, traded minutes are real candles, quiet minutes inside coverage repeat the last close, minutes not downloaded are left out">
+  <p class="sub">Forward fill by default, but only where we know nothing traded.</p>
+  <div class="fig"><svg viewBox="0 0 900 250" role="img" aria-label="A row of minutes: before the first trade no rows, traded minutes are real candles, quiet minutes inside coverage repeat the last close, minutes not downloaded are left out">
       <text x="20" y="28" font-size="13" font-weight="700" fill="var(--muted)" letter-spacing="1">ONE MARKET, MINUTE BY MINUTE</text>
       <rect x="20" y="44" width="760" height="22" rx="6" fill="var(--ok-soft)"/>
       <text x="400" y="60" text-anchor="middle" font-size="12" font-weight="600" fill="var(--ok)">coverage: every trade here is stored</text>
@@ -604,137 +644,186 @@ pm.wait(pm.backfill("KXBTCD-…"))</pre>
       </g>
       <text x="20" y="222" font-size="13" fill="var(--ink)">fill=forward (default): every bucket inside coverage after the first trade, until the close.</text>
       <text x="20" y="242" font-size="13" fill="var(--ink)">fill=raw: the solid boxes only.</text>
-    </svg>
-  </div>
-  <div class="tablecard" style="margin-top:14px">
-    <table>
-      <tr><th>Parameter</th><th>Meaning</th></tr>
-      <tr><td><code>interval</code></td><td><code>1m 5m 15m 1h 4h 1d</code> — Binance's names; buckets start on round UTC times.</td></tr>
-      <tr><td><code>start</code> · <code>end</code></td><td><code>2026-10-31</code>, <code>2026-10-31T14:00:00Z</code> or Unix seconds; end not included. Default: the last day of the market's life.</td></tr>
-      <tr><td><code>fill</code></td><td><code>forward</code> (default) or <code>raw</code>.</td></tr>
-      <tr><td><code>limit</code></td><td>Up to 10,000 rows a page; follow <code>next_page_token</code> for the rest (pmapi does it for you).</td></tr>
-      <tr><td>columns</td><td><code>ts open high low close volume open_interest filled</code> — <code>ts</code> is the bucket's start, in UTC.</td></tr>
-      <tr><td><code>coverage</code></td><td><code>{"from", "to", "complete"}</code>: what is held, and whether it covers your window.</td></tr>
-    </table>
-  </div>
-  <div class="grid" style="margin-top:14px">
-    <div class="item"><h3>Carried in</h3><p>A window that starts mid-life opens with the last close before it.</p></div>
-    <div class="item"><h3>Never invented</h3><p>Minutes not downloaded yet get no row; <code>complete</code> turns false instead.</p></div>
-    <div class="item"><h3>Always current</h3><p>Every interval is built from the stored minutes at the moment you ask.</p></div>
-  </div>
+    </svg></div>
+  <div class="tablecard" style="margin-top:14px"><table>
+    <tr><th>Parameter</th><th>Meaning</th></tr>
+    <tr><td>interval</td><td><code>1m</code> <code>5m</code> <code>15m</code> <code>1h</code> <code>4h</code> <code>1d</code>; buckets start on round UTC times.</td></tr>
+    <tr><td>start · end</td><td><code>2026-10-31</code>, <code>2026-10-31T14:00:00Z</code> or Unix seconds; end not included. Default: the last day of the market's life.</td></tr>
+    <tr><td>fill</td><td><code>forward</code> (default) or <code>raw</code>.</td></tr>
+    <tr><td>columns</td><td><code>ts open high low close volume open_interest filled</code>; ts is the bucket's start. Polymarket: price of the first outcome, volume in shares, no open interest.</td></tr>
+    <tr><td>coverage</td><td><code>{"from", "to", "complete"}</code>: what is held, and whether it covers your window.</td></tr>
+  </table></div>
 </section>
 
-<!-- A5 ------------------------------------------------------------------>
 <section>
-  <h2><span class="n">5</span>The push command</h2>
-  <p class="sub">Ask the server to fetch one market again — it answers at once and works in the background.</p>
+  <h2><span class="n">5</span>Similar markets</h2>
+  <p class="sub"><code>GET /v1/markets/{ticker}/similar</code>, nearest first. Every limit applies only where both markets have that measure.</p>
+  <div class="tablecard"><table>
+    <tr><th>Parameter</th><th>Meaning</th></tr>
+    <tr><td>venue</td><td><code>all</code> (default), <code>kalshi</code> or <code>poly</code>: where to look.</td></tr>
+    <tr><td>status</td><td><code>open</code> (default), <code>closed</code> or <code>all</code>.</td></tr>
+    <tr><td>max_cosine</td><td>Largest text distance kept, 0 = same wording; default 0.3.</td></tr>
+    <tr><td>max_days</td><td>Largest gap in days between the dates the two questions turn on.</td></tr>
+    <tr><td>max_level</td><td>Largest relative gap between thresholds, e.g. 0.1 = 10%.</td></tr>
+    <tr><td>gates</td><td><code>subject</code> (same subject or named outcome), <code>keywords</code> (critical words, names, times of day agree).</td></tr>
+    <tr><td>limit</td><td>Up to 1,000 rows (default 50).</td></tr>
+  </table></div>
+  <p class="sub" style="margin:12px 0 0">Columns: <code>ticker venue title status same_event kind subject entity comparator low high unit when when_kind text days level opposite distance relation</code>; the market asked about comes back beside them, as its record.</p>
+</section>
+
+<section>
+  <h2><span class="n">6</span>Polymarket trades</h2>
+  <p class="sub"><code>GET /v1/markets/{condition_id}/trades?start=&amp;end=</code>, oldest first, up to 10,000 a page.</p>
+  <div class="tablecard"><table>
+    <tr><th>Column</th><th>Meaning</th></tr>
+    <tr><td>ts</td><td>When it traded (UTC, to the second).</td></tr>
+    <tr><td>outcome · side</td><td>Which outcome token, and BUY or SELL by the taker.</td></tr>
+    <tr><td>price · yes_price</td><td>Price paid for that token, and as the first outcome's price (1 − p for the other).</td></tr>
+    <tr><td>size · notional</td><td>Shares, and USDC paid.</td></tr>
+    <tr><td>wallet · tx_hash</td><td>The taker's proxy wallet and the Polygon transaction.</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2><span class="n">7</span>The push command</h2>
+  <p class="sub">Ask the server to fetch one market again: it answers at once and works in the background.</p>
   <div class="two">
-    <div>
-      <pre><span class="c"># ask</span>
+<pre><span class="c"># ask</span>
 POST /v1/backfill
 {"ticker": "KXBTCD-…",
- "from": "2026-10-31", "to": "2026-11-01"}   <span class="c">← optional</span>
-
+ "from": "2026-10-31", "to": "2026-11-01"}  <span class="c">← optional</span>
 <span class="c"># answer: 202 Accepted</span>
-{"job_id": 17, "status": "queued", …}
-
-<span class="c"># follow</span>
+{"job_id": 17, "status": "queued", …}</pre>
+<pre><span class="c"># follow</span>
 GET /v1/backfill/17
 {"status": "done", "candles": 1212,
- "progress": {"requests_done": 5, "requests_total": 5}}</pre>
-    </div>
-    <ul class="check">
-      <li class="done">Default stretch<span>The market's whole life in the store window: from its open, or 30 days back.</span></li>
-      <li class="done">Overwrites<span>Stored candles in that stretch are replaced with Kalshi's answer.</span></li>
-      <li class="done">Shared budget<span>Runs at warm priority: after hot markets, before backfill.py.</span></li>
-      <li class="done">Survives restarts<span>Jobs are saved; one cut short is run again when the API returns.</span></li>
-      <li class="done">One at a time<span>A second push for the same market while one runs gets <code>409</code>.</span></li>
-    </ul>
+ "progress": {"requests_done": 5,
+              "requests_total": 5}}</pre>
   </div>
+  <div class="tablecard" style="margin-top:14px"><table>
+    <tr><td>Kalshi</td><td>Stored candles in the stretch are replaced with Kalshi's answer; up to 100 queued jobs share each request.</td></tr>
+    <tr><td>Polymarket</td><td>The market's trade list is read again back to the start of the stretch; new trades are stored and their candles remade.</td></tr>
+    <tr><td>Survives restarts</td><td>Jobs are saved; one cut short runs again when the API returns. A second push for a market already running gets 409.</td></tr>
+  </table></div>
 </section>
 
-<!-- A6 ------------------------------------------------------------------>
 <section>
-  <h2><span class="n">6</span>Formats and pandas</h2>
-  <p class="sub">Add <code>format=</code> to any list. pmapi uses parquet on its own when pyarrow is installed.</p>
+  <h2><span class="n">8</span>Formats and pandas</h2>
+  <p class="sub">Add <code>format=</code> to any list. pmapi uses parquet by itself when pyarrow is installed.</p>
   <div class="grid">
-    <div class="item"><h3>json <span class="pill">default</span></h3><p>Rows plus <code>coverage</code> and <code>next_page_token</code>: <code>pd.DataFrame(r.json()["candles"])</code>.</p></div>
-    <div class="item"><h3>csv</h3><p>Straight into <code>pd.read_csv(url, storage_options={"X-API-Key": key})</code>.</p></div>
-    <div class="item"><h3>parquet <span class="pill ok">fastest</span></h3><p>~10× smaller, real time and number types: <code>pd.read_parquet(io.BytesIO(r.content))</code>.</p></div>
+    <div class="item"><h3>json <span class="pill">default</span></h3><p>Rows plus coverage and <code>next_page_token</code>.</p></div>
+    <div class="item"><h3>csv</h3><p>Straight into <code>pd.read_csv</code>; the next page's token in <code>X-Next-Page-Token</code>.</p></div>
+    <div class="item"><h3>parquet <span class="pill ok">fastest</span></h3><p>~10× smaller, real time and number types.</p></div>
   </div>
-  <div class="formula" style="margin-top:14px">
-    <span class="c">csv and parquet</span>  the next page's token is in the <code>X-Next-Page-Token</code> header<br>
-    <span class="c">one market    </span>  coverage is in <code>X-Coverage-From</code> · <code>-To</code> · <code>-Complete</code>
-  </div>
-  <div class="tablecard" style="margin-top:14px">
-    <table>
-      <tr><th>pmapi</th><th>Returns</th></tr>
-      <tr><td><code>pm.markets(**filters)</code></td><td>DataFrame of markets, every page joined.</td></tr>
-      <tr><td><code>pm.candles(t, "5m", start, end)</code></td><td>DataFrame indexed by <code>ts</code>; <code>df.attrs["coverage"]</code>.</td></tr>
-      <tr><td><code>pm.candles([a, b], "1h")</code></td><td>One long DataFrame with a <code>ticker</code> column.</td></tr>
-      <tr><td><code>pm.closes([a, b], "1h")</code></td><td>Wide: one close column per market, ready to correlate.</td></tr>
-      <tr><td><code>pm.latest(t or [..])</code></td><td>Dict for one market; DataFrame for a list.</td></tr>
-      <tr><td><code>pm.market · event · series · categories</code></td><td>Dicts and DataFrames for the rest of the catalogue.</td></tr>
-      <tr><td><code>pm.hot() · pm.status()</code></td><td>The hot list; how collection is doing.</td></tr>
-      <tr><td><code>pm.backfill(t) · pm.wait(job)</code></td><td>Push a backfill; block until it is done.</td></tr>
-    </table>
-  </div>
+  <div class="tablecard" style="margin-top:14px"><table>
+    <tr><th>pmapi</th><th>Returns</th></tr>
+    <tr><td>pm.markets(**filters)</td><td>DataFrame of markets, every page joined; <code>limit=</code> or <code>max_rows=</code> caps it.</td></tr>
+    <tr><td>pm.candles(t, "5m", start, end)</td><td>DataFrame indexed by ts; a list of tickers gives one long table.</td></tr>
+    <tr><td>pm.closes([a, b], "1h")</td><td>Wide: one close column per market, ready to correlate.</td></tr>
+    <tr><td>pm.trades(condition_id)</td><td>Every stored trade of a Polymarket market.</td></tr>
+    <tr><td>pm.similar(t, venue, status, …)</td><td>The nearest markets, with distances and relations.</td></tr>
+    <tr><td>pm.latest(t or [..])</td><td>Dict for one market; DataFrame for a list.</td></tr>
+    <tr><td>pm.market · events · series · categories</td><td>The rest of the catalogue; <code>pm.events(venue="poly")</code> for Polymarket.</td></tr>
+    <tr><td>pm.hot() · pm.status() · pm.checks() · pm.health()</td><td>The hot list; how collection is doing; the daily check; is the server up.</td></tr>
+    <tr><td>pm.backfill(t) · pm.wait(job)</td><td>Push a backfill; block until it is done.</td></tr>
+  </table></div>
 </section>
 
-<!-- A7 ------------------------------------------------------------------>
 <section>
-  <h2><span class="n">7</span>Limits and errors</h2>
+  <h2><span class="n">9</span>Limits and errors</h2>
   <p class="sub">Every error has the same shape: <code>{"error": {"code": "…", "message": "…"}}</code>.</p>
-  <div class="two">
-    <div class="tablecard">
-      <table>
-        <tr><th>Status</th><th>Code · when</th></tr>
-        <tr><td>400</td><td><code>invalid_parameter</code> · a bad interval, time, sort or limit</td></tr>
-        <tr><td>401</td><td><code>missing_key</code> / <code>invalid_key</code> · no key, wrong or revoked</td></tr>
-        <tr><td>403</td><td><code>read_only_key</code> · a read key asked for a backfill</td></tr>
-        <tr><td>404</td><td><code>not_found</code> · not in the store (30-day window)</td></tr>
-        <tr><td>409</td><td><code>already_queued</code> · that market's backfill is running</td></tr>
-        <tr><td>429</td><td><code>rate_limited</code> · wait <code>Retry-After</code> seconds</td></tr>
-        <tr><td>503</td><td><code>query_timeout</code> / <code>database_unavailable</code></td></tr>
-      </table>
-    </div>
-    <div class="grid" style="grid-template-columns:1fr">
-      <div class="item"><h3>600 requests a minute <span class="pill">per key</span></h3><p><code>X-RateLimit-Remaining</code> on every answer; pmapi waits out a 429 itself.</p></div>
-      <div class="item"><h3>10 backfills a minute <span class="pill">per key</span></h3><p>Each one costs Kalshi requests, so they are capped on their own.</p></div>
-      <div class="item"><h3>Keys stored hashed</h3><p>A stolen table opens nothing; a revoked key stops within a minute.</p></div>
-      <div class="item"><h3>No way through to Kalshi</h3><p>Only backfill jobs reach it, on their own line of the shared budget.</p></div>
-      <div class="item"><h3>Usage page <span class="pill ok">viewer</span></h3><p><code>/status</code> charts requests by caller, response times, the Kalshi budget, backfill progress and jobs.</p></div>
-    </div>
-  </div>
+  <div class="tablecard"><table>
+    <tr><th>Status</th><th>Code · when</th></tr>
+    <tr><td>400</td><td><code>invalid_parameter</code> · a bad interval, time, sort, gate or limit</td></tr>
+    <tr><td>401</td><td><code>missing_key</code> / <code>invalid_key</code></td></tr>
+    <tr><td>403</td><td><code>read_only_key</code> · a read key asked for a backfill</td></tr>
+    <tr><td>404</td><td><code>not_found</code> · not in the store (30-day window)</td></tr>
+    <tr><td>409</td><td><code>already_queued</code> · that market's backfill is running</td></tr>
+    <tr><td>429</td><td><code>rate_limited</code> · 600 requests or 10 backfills a minute per key; wait Retry-After</td></tr>
+    <tr><td>503</td><td><code>query_timeout</code> / <code>database_unavailable</code></td></tr>
+  </table></div>
 </section>
 
-<!-- A8 ------------------------------------------------------------------>
+</div>
+
+<div class="tab" id="decisions">
+
 <section>
-  <h2><span class="n">8</span>Tested</h2>
-  <p class="sub">tests/api_test.py, against the simulated Kalshi whose every trade is known.</p>
-  <ul class="check" id="api-tests">
-    <li class="done">Keys and limits<span>No key, wrong key, revoked, read-only, Bearer, and the sixth request of a five-a-minute key.</span></li>
-    <li class="done">Every refusal<span>Thirteen bad requests, each with its documented status and code.</span></li>
-    <li class="done">The push command<span>Busy, quiet, closed and never-traded markets: exactly the true trades stored.</span></li>
-    <li class="done">Forward fill<span>1m, 5m, 1h and 1d, whole-life and mid-life windows, matched to a fill of the truth.</span></li>
-    <li class="done">Paging and formats<span>Small pages joined = one page; json = csv = parquet; 5 tickers together = each alone.</span></li>
-    <li class="done">A crash mid-job<span>A second push refused while one runs; the API killed mid-job; the job finished after the restart.</span></li>
-    <li class="done">Usage charts<span>Minute files written, read across days, gaps refilled after a restart, old files deleted; every chart drawn.</span></li>
-    <li class="done">Request records<span>Every request logged with key, status, rows and bytes; none lost while the table was away; usage page renders.</span></li>
-  </ul>
+  <h2><span class="n">1</span>Every decision, and why</h2>
+  <p class="sub">Newest first. Each one is a choice made on purpose; reversing it means reading the reason first.</p>
+  <div class="tablecard"><table class="dec">
+    <tr><th>When</th><th>Decision</th><th>Why</th></tr>
+    <tr><td>3 Nov</td><td>Polymarket&#x27;s data API v2 for every trade</td><td>v1 was retired on 2 Nov (it answers 410). v2 is cursor-paged with no depth limit, about 1 s fresh instead of ~4 min, and not cached by Cloudflare. Trade ids were checked to be identical, so nothing is stored twice.</td></tr>
+    <tr><td>3 Nov</td><td>Big markets read in batches of 50,000; midpoints removed</td><td>v2 lists every trade, so the busiest markets&#x27; oldest history no longer needs the order-book midpoint. Batches keep memory flat; 102,499 midpoint candles (3 markets) were deleted and those markets read again as real trades: one alone had 1,867,799 trades v1 could never list. Nine markets whose stored totals sat on round numbers were read again too; they were missing 0-275 trades each, so they had not really been cut short.</td></tr>
+    <tr><td>3 Nov</td><td>Polymarket events get Kalshi&#x27;s category names from their tags</td><td>The mapping lived only in the retired loader, so since the rebuild every Polymarket event had no category and fell out of every category filter. 187,178 of 187,200 events now have one; the first matching category in a fixed order wins (an event tagged trump and elections is Elections).</td></tr>
+    <tr><td>3 Nov</td><td>Gamma market look-ups move to /markets/keyset</td><td>The first daily check caught Polymarket marking /markets deprecated (sunset 1 May 2026, &#x27;use /markets/keyset&#x27;). It still answers; v1 of the trades API also still answered until the day it did not.</td></tr>
+    <tr><td>3 Nov</td><td>Related wording reads nearest first on both venues</td><td>A GiST trigram index on the 1.6M Polymarket questions (322 MB) lets the panel walk to the nearest wording instead of scoring every candidate: 5-14 s down to 1.4-2 s.</td></tr>
+    <tr><td>3 Nov</td><td>Vectors for cross-venue matches; wording for siblings</td><td>On 20 real markets, vectors found the same bet worded differently where wording found junk (Bitcoin $200k, the House, SAVE Act), in milliseconds. Wording won on &#x27;who will win&#x27; markets: the named outcome is masked out of the vector and not yet put back into the ranking.</td></tr>
+    <tr><td>3 Nov</td><td>WARP dropped; Polymarket goes direct</td><td>Overnight tests showed Polymarket answers directly whenever the network lets anything through. During blocks WARP&#x27;s tunnel broke too, taking every open connection with it, and switching routes (106 times in a day) only opened more new connections, which blocks refuse. Direct connections stay open through blocks, as Kalshi&#x27;s do.</td></tr>
+    <tr><td>3 Nov</td><td>One feed read goes back at most 100,000 trades</td><td>Memory: after a long gap the feed starts again from now and the gap is caught up market by market.</td></tr>
+    <tr><td>3 Nov</td><td>Viewer&#x27;s manage page walks indexes</td><td>It sorted all 4.5 million markets on every view (12–39 s). Now each venue gives its best rows from an index in the page&#x27;s order, and candle counts come from views refreshed every 10 minutes.</td></tr>
+    <tr><td>3 Nov</td><td>Polymarket events in the API; each market&#x27;s record in its detail</td><td>One API for both venues: events were Kalshi-only. The record shows what the similar search reads for that market.</td></tr>
+    <tr><td>3 Nov</td><td>Old Windows-era scripts removed</td><td>kalshi_candles.py, kalshi_markets.py and polymarket.py were not run or imported by anything; load_db.py kept only for perpetuals.</td></tr>
+    <tr><td>3 Nov</td><td>Daily data check at 09:00 UTC, pushed through ntfy</td><td>The v1 retirement went unnoticed for 6 hours. 09:00 UTC is the quietest hour on both venues (Kalshi ~23% of its peak, Polymarket ~10%), so re-reading samples costs the least. ntfy needs no password on the server.</td></tr>
+    <tr><td>3 Nov</td><td>Service files for match.py and check.py</td><td>The one sudo install now covers all ten programs.</td></tr>
+    <tr><td>3 Nov</td><td>A watchdog every 5 minutes, beside the daily check</td><td>The daily check speaks once a day; a stopped program or a stalled feed should reach your phone in minutes.</td></tr>
+    <tr><td>3 Nov</td><td>Perpetuals removed</td><td>Never collected here (their tables were empty); off the viewer, out of the code and the schema until wanted.</td></tr>
+    <tr><td>3 Nov</td><td>The viewer shows data, not bookkeeping</td><td>Tracking, feed, dirty-minute, record and vector tables are the programs&#x27; own state; listing them only confused.</td></tr>
+    <tr><td>3 Nov</td><td>Status page updates in place; dark mode</td><td>A full reload every 30 s jumped the page while reading. Dark follows the system, with a switch on every page.</td></tr>
+    <tr><td>3 Nov</td><td>Related wording searches both venues at once</td><td>Kalshi&#x27;s half takes ~0.6 s; matching 1.6M Polymarket questions by shared letters 1.5–2.5 s. Run in turn they took 2–8 s.</td></tr>
+    <tr><td>3 Nov</td><td>Log rotation at 50 MB, 10 kept</td><td>The logs grow ~25 MB a day; installed with the services.</td></tr>
+    <tr><td>3 Nov</td><td>No rewrite in Rust, C++ or Go</td><td>The programs spend their time waiting on the venues&#x27; rate limits, the network and PostgreSQL, not on Python; the heavy work is already in SQL. A rewrite would add risk and gain nothing measurable.</td></tr>
+    <tr><td>2 Nov</td><td>pgvector, searched when asked; no stored pairs or reasons</td><td>Finding the markets nearest one market is a vector search plus arithmetic on fields. A table of pairs and reasons would be redundant and need upkeep.</td></tr>
+    <tr><td>2 Nov</td><td>Four slices with their own HNSW index</td><td>Filtering one shared index by venue and status after the search emptied the results; a partial index per (venue, open/closed) searches only what was asked for.</td></tr>
+    <tr><td>2 Nov</td><td>Templates, not titles, are embedded</td><td>Numbers, dates, comparators and named outcomes are masked out, so a ladder of strikes is one vector and above/below cannot look alike.</td></tr>
+    <tr><td>2 Nov</td><td>distance = text + 0.10·days/365 + 0.50·level + 0.05·opposite</td><td>One number to sort by, with each part also returned. Level weighs most because a different threshold is a different bet.</td></tr>
+    <tr><td>2 Nov</td><td>Strikes one cent apart count as identical</td><td>Kalshi writes 67,599.99 where Polymarket writes 67,600.</td></tr>
+    <tr><td>2 Nov</td><td>Polymarket candles from trades, by a separate aggregator</td><td>Polymarket has no candle API; its price history is a sampled midpoint with no volume. A separate process lets the trade readers stay fast and can be rebuilt from the trades at any time.</td></tr>
+    <tr><td>2 Nov</td><td>One API for both venues</td><td>A Polymarket condition id goes wherever a ticker goes; venue=kalshi|poly|all on the lists.</td></tr>
+    <tr><td>2 Nov</td><td>Kalshi stays direct</td><td>Kalshi answers 403 to Cloudflare WARP&#x27;s addresses.</td></tr>
+    <tr><td>2 Nov</td><td>&quot;Did it trade?&quot; uses total and 24-hour volume together</td><td>Polymarket&#x27;s listed total volume can be stale for days; 24-hour volume moves.</td></tr>
+    <tr><td>2 Nov</td><td>Missed live minutes are not prioritised over old history</td><td>Your call: fine for now.</td></tr>
+    <tr><td>1 Nov</td><td>The filled column is redundant (volume = 0)</td><td>Noted; it will be dropped when you say.</td></tr>
+    <tr><td>1 Nov</td><td>Per-second cap on each budget</td><td>Venues count per second too: at most 15 a second to Kalshi, 8 to Polymarket.</td></tr>
+    <tr><td>1 Nov</td><td>Pushed backfills batched; jobs held by a lease</td><td>Up to 100 queued Kalshi jobs share a request (1,055 jobs took 146 requests); a job whose heartbeat stops is taken over by another API process.</td></tr>
+    <tr><td>1 Nov</td><td>API as 4 processes</td><td>One Python process tops out near 40 requests a second; four reach about 100.</td></tr>
+    <tr><td>1 Nov</td><td>Intervals built from the one-minute rows; fill when read</td><td>Always matches what is stored, even right after a backfill; storage stays traded minutes only.</td></tr>
+    <tr><td>1 Nov</td><td>API shaped like Alpaca</td><td>Clean request shape, Binance&#x27;s interval names, files that load straight into pandas.</td></tr>
+    <tr><td>31 Oct</td><td>Related wording over distinct titles</td><td>Nearest titles first, then each one&#x27;s busiest market: 0.5 s instead of 6 s.</td></tr>
+    <tr><td>31 Oct</td><td>Nearby: expiry and odds only</td><td>A strike depends on how a title is worded; expiry and price do not.</td></tr>
+    <tr><td>Oct</td><td>1-minute candles, traded minutes only</td><td>Kalshi&#x27;s own resolution (5-second polling broke the rate limit); empty minutes would be ~260 million rows a day for nothing.</td></tr>
+    <tr><td>Oct</td><td>30-day window</td><td>Markets open now or closed in the last 30 days; older ones are deleted with their candles and trades.</td></tr>
+    <tr><td>Oct</td><td>Scores in PostgreSQL; separate programs; REST, not WebSocket</td><td>One statement scores every Kalshi market in ~3 s; each program can be stopped or rerun alone; the WebSocket needs a key.</td></tr>
+  </table></div>
 </section>
 
-</div><!-- api -->
+<section>
+  <h2><span class="n">2</span>What each venue gives</h2>
+  <p class="sub">And what is read out of the wording instead.</p>
+  <div class="tablecard"><table>
+    <tr><th>Data</th><th>Kalshi</th><th>Polymarket</th></tr>
+    <tr><td>One-minute candles</td><td>Yes, with volume and open interest</td><td>No: made here from every trade</td></tr>
+    <tr><td>Every trade, with who made it</td><td>Anonymous; not collected</td><td>Yes: size, price, taker's wallet, transaction</td></tr>
+    <tr><td>Structured strikes</td><td>Strike type, floor and cap</td><td>Only in the wording: read by regex</td></tr>
+    <tr><td>Grouping</td><td>series → event → market</td><td>event → market → outcome token</td></tr>
+    <tr><td>Categories</td><td>One per series</td><td>8–9 tags per event, mapped to Kalshi's categories</td></tr>
+    <tr><td>Open interest per minute</td><td>Yes</td><td>No</td></tr>
+    <tr><td>Closes when</td><td>close_time, on the hour</td><td>Open until resolved; end_date is often a day after the date asked about</td></tr>
+  </table></div>
+</section>
 
-<footer>prediction_markets_server · docs/architecture.html · updated 1 Nov 2026</footer>
+</div>
+
+<footer>prediction_markets_server · docs/architecture.html · also at <code>/docs</code> on the viewer · updated 3 Nov 2026</footer>
+
 </div>
 <script>
-  // Tabs: #api opens the API tab. Without scripts both tabs simply show in turn.
+  // Tabs: #api and #decisions open those tabs. Without scripts every tab shows in turn.
   (function () {
     document.documentElement.classList.add("js");
     var tabs = document.querySelectorAll(".tabs a"), panels = document.querySelectorAll(".tab");
     function show(name) {
-      if (name !== "api") name = "architecture";
+      if (name !== "api" && name !== "decisions") name = "architecture";
       panels.forEach(function (p) { p.hidden = p.id !== name; });
       tabs.forEach(function (t) { t.setAttribute("aria-selected", t.dataset.tab === name); });
     }
