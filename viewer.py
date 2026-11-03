@@ -249,6 +249,8 @@ PAGE = """
  .mctl a.on { font-weight: 700; color: var(--ink); text-decoration: none; }
  .chip { font-size: 10px; padding: 0 5px; border-radius: 6px; background: var(--soft); color: var(--muted); }
  .chip.same { background: var(--ok-soft); color: var(--ok); }
+ .matching .mnote { font-size: 10.5px; line-height: 1.35; color: var(--faint); margin: 2px 0 6px; }
+ .wrow.wlim { margin-top: 8px; }
  .cols.no-matching .matching { display: none; }
  .nearby { width: 300px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
            max-height: 78vh; overflow-y: auto; }
@@ -488,7 +490,13 @@ PAGE = """
     <div class="mctl" id="mven"><a data-v="all" class="on">both venues</a><a data-v="other">other venue</a><a data-v="same">same venue</a></div>
     <div class="mctl" id="mst"><a data-s="open" class="on">open</a><a data-s="all">open and closed</a></div>
     <div id="wts"></div>
+    <div class="wrow wlim"><label for="w-limit">Wording limit</label><input type="range" id="w-limit"
+      min="0" max="1" step="0.01" value="0.30"><span id="wv-limit">0.30</span></div>
+    <div class="mnote">Markets worded further apart than this are left out. Moving it fetches the markets
+      again: the best 300 inside the limit by the weights above (from the 1,000 closest wordings on each
+      venue). The weights then only re-order those 300.</div>
     <div class="mctl"><a id="wdef">defaults</a><a id="wnoname">names off</a></div>
+    <div class="meta" id="mcount"></div>
     <div id="mrows"><span class="meta">loading&hellip;</span></div>
     <script>
     (function () {
@@ -498,6 +506,7 @@ PAGE = """
                ['strike', 'level', 'Strike gap', 1, 0.50], ['side', 'opposite', 'Above/below', 0.3, 0.05],
                ['name', 'name', 'Name', 1, 0.40]];
       var w = {}, rows = null, ven = 'all', st = 'open', ctrl = null;   // rows: null until the first answer
+      var LIM = 0.30, lim = LIM, limit = document.getElementById('w-limit');
       var box = document.getElementById('mrows'), wts = document.getElementById('wts');
       function esc(t) { return (t || '').replace(/[&<>"]/g, function (c) {
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
@@ -530,7 +539,15 @@ PAGE = """
         d.querySelector('input').addEventListener('input', function (e) { w[x[0]] = parseFloat(e.target.value); draw(); });
       });
       var DEF = {}; W.forEach(function (x) { DEF[x[0]] = x[4]; });
-      document.getElementById('wdef').onclick = function () { setW(DEF); };
+      document.getElementById('wdef').onclick = function () {
+        setW(DEF);
+        if (lim !== LIM) { lim = LIM; limit.value = LIM; showLim(); load(); }
+      };
+      // The wording limit decides which markets come back, so it fetches
+      // again, once the slider is let go.
+      function showLim() { document.getElementById('wv-limit').textContent = parseFloat(limit.value).toFixed(2); }
+      limit.addEventListener('input', showLim);
+      limit.addEventListener('change', function () { lim = parseFloat(limit.value); load(); });
       document.getElementById('wnoname').onclick = function () { setW(Object.assign({}, w, {name: 0})); };
       function pick(id, attr, set) {
         document.getElementById(id).addEventListener('click', function (e) {
@@ -545,13 +562,18 @@ PAGE = """
         if (ctrl) ctrl.abort();
         ctrl = new AbortController();
         box.style.opacity = 0.5;
-        fetch('/matching?table={{ table_name }}&ticker={{ selection|urlencode }}&venue=' + ven + '&status=' + st,
-              {signal: ctrl.signal})
+        var ws = W.map(function (x) { return '&w_' + x[1] + '=' + w[x[0]]; }).join('');
+        fetch('/matching?table={{ table_name }}&ticker={{ selection|urlencode }}&venue=' + ven + '&status=' + st +
+              '&max_cosine=' + lim + ws, {signal: ctrl.signal})
           .then(function (r) { return r.json(); })
           .then(function (d) {
             box.style.opacity = 1;
             if (d.error) { box.innerHTML = '<span class="meta">' + esc(d.error) + '</span>'; rows = []; return; }
-            rows = d.rows; draw();
+            rows = d.rows;
+            document.getElementById('mcount').textContent = (rows.length >= d.pool
+              ? d.pool + ' fetched, the most kept' : rows.length + ' inside the limit') +
+              ' · top ' + Math.min(25, rows.length) + ' shown';
+            draw();
           }).catch(function () {});
       }
       setW(DEF);
@@ -2520,16 +2542,28 @@ def matching_feed():
     venue = {"all": "all", "same": home,
              "other": "kalshi" if home == "poly" else "poly"}.get(request.args.get("venue"), "all")
     status = request.args.get("status") if request.args.get("status") in ("open", "all") else "open"
+
+    def number(key, default, top):
+        try:
+            v = float(request.args.get(key, default))
+        except ValueError:
+            return default
+        return min(max(v, 0.0), top) if math.isfinite(v) else default
+    # The pool is the best MATCH_POOL by the panel's weights at the time,
+    # inside its wording limit; the weights then re-rank it in the browser.
+    max_cosine = number("max_cosine", 0.3, 2.0)
+    weights = {k: number("w_" + k, v, 10.0) for k, v in S.WEIGHTS.items()}
     try:
         with db.cursor() as cur:
-            rows, me = S.similar(cur, ident, MATCH_POOL, venue, status)
+            rows, me = S.similar(cur, ident, MATCH_POOL, venue, status, max_cosine, weights=weights)
     except ApiError as exc:
         return jsonify({"rows": [], "error": exc.message})
     # Only what the panel shows or weighs.
     return jsonify({"rows": [{
         **{k: r[k] for k in MATCH_FIELDS}, "level_cost": S._level_cost(me, r["level"]),
         "href": ("/table/poly_candles?ticker=" if r["venue"] == "poly"
-                 else "/table/kalshi_candles?ticker=") + r["ticker"]} for r in rows]})
+                 else "/table/kalshi_candles?ticker=") + r["ticker"]} for r in rows],
+        "pool": MATCH_POOL})
 
 
 # A market's price is its last trade, worked out when asked: the newest
