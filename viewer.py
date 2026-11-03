@@ -2064,8 +2064,8 @@ def _poly():
     try:
         r = ratelimit.client()
         out["down"] = r.get(f"{settings.REDIS_PREFIX}down:data-api.polymarket.com")
-        out["route"] = r.get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com") or (
-            "vpn" if settings.VPN_PROXY else "direct")
+        out["route"] = ((r.get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com") or "vpn")
+                        if settings.VPN_PROXY else "direct")
         out["used"] = sum(ratelimit.used(s, 1, "poly") or 0 for s in ratelimit.SHARE)
     except Exception:
         pass

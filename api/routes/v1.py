@@ -827,7 +827,9 @@ def _poly_status(now):
     """Polymarket's side: the trade feed, catching up, candles waiting, budget."""
     try:
         down = ratelimit.client().get(f"{settings.REDIS_PREFIX}down:data-api.polymarket.com")
-        route = ratelimit.client().get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com")
+        # (a route noted while a VPN was set means nothing once it is not)
+        route = (ratelimit.client().get(f"{settings.REDIS_PREFIX}route:data-api.polymarket.com")
+                 if settings.VPN_PROXY else "direct")
         used = {s: ratelimit.used(s, 1, "poly") for s in ratelimit.SHARE}
         factor = ratelimit.factor("poly")
     except Exception:
