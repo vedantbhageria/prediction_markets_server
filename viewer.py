@@ -236,7 +236,7 @@ PAGE = """
  .main { flex: 1; overflow-x: auto; min-width: 0; }
  .matching { width: 300px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
              max-height: 78vh; overflow-y: auto; }
- .matching b { display: block; font-size: 12px; text-transform: uppercase; color: var(--muted); }
+ .matching > b { display: block; font-size: 12px; text-transform: uppercase; color: var(--muted); }
  .matching .anchor { font-size: 11px; color: var(--faint); margin-bottom: 6px; }
  .matching a.m { display: block; font-size: 12px; text-decoration: none; margin-top: 6px; }
  .matching .meta { font-size: 11px; color: var(--muted); }
@@ -2458,6 +2458,8 @@ def build_panels(name, value, ticker, dim="", limit=200):
 # Markets the title-matching panel re-ranks in the browser: the nearest by the
 # default weights, enough that other weights still find their own nearest.
 MATCH_POOL = 300
+MATCH_FIELDS = ("ticker", "venue", "title", "entity", "relation", "when",
+                "text", "days", "opposite", "name")
 
 
 @app.route("/nearby")
@@ -2507,11 +2509,11 @@ def matching_feed():
             rows, me = S.similar(cur, ident, MATCH_POOL, venue, status)
     except ApiError as exc:
         return jsonify({"rows": [], "error": exc.message})
-    for r in rows:
-        r["level_cost"] = S._level_cost(me, r["level"])
-        r["href"] = ("/table/poly_candles?ticker=" if r["venue"] == "poly"
-                     else "/table/kalshi_candles?ticker=") + r["ticker"]
-    return jsonify({"rows": rows})
+    # Only what the panel shows or weighs.
+    return jsonify({"rows": [{
+        **{k: r[k] for k in MATCH_FIELDS}, "level_cost": S._level_cost(me, r["level"]),
+        "href": ("/table/poly_candles?ticker=" if r["venue"] == "poly"
+                 else "/table/kalshi_candles?ticker=") + r["ticker"]} for r in rows]})
 
 
 # A market's price is its last trade, worked out when asked: the newest
