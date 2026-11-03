@@ -40,7 +40,7 @@ clears:
     programs     a program is not running
     kalshi_live  Kalshi live more than 15 minutes behind
     poly_feed    the Polymarket feed more than 30 minutes behind
-    aggregate    a minute waiting more than an hour for its candle
+    aggregate    over 50,000 minutes waiting for their candle and not going down
     disk         less than 10% free
     venue_api    a venue answered 410 (an endpoint retired), sent a
                  deprecation notice, or left out a field the code needs
@@ -125,13 +125,15 @@ def freshness():
 
 def check_freshness(ctx):
     out, worst = freshness(), OK
+    # Minutes waiting for their candle are counted, not aged: a history
+    # backfill marks old minutes, and the aggregator makes ~20,000 a minute.
     for value, warn, fail in ((out["kalshi_live_s"], 300, 1800),
                               (out["poly_feed_s"] if out["poly_feed_s"] is not None else 1e9, 600, 3600),
-                              (out["oldest_waiting_s"], 1800, 7200)):
+                              (out["candles_waiting"], 50_000, 500_000)):
         level = _level(value, warn, fail)
         worst = min(worst, level, key=ORDER.get)
     return worst, (f"Kalshi live {out['kalshi_live_s']} s behind, Polymarket feed"
-                   f" {out['poly_feed_s']} s, oldest candle waiting {out['oldest_waiting_s']} s"), out
+                   f" {out['poly_feed_s']} s, {out['candles_waiting']:,} minutes waiting for their candle"), out
 
 
 def not_running():
@@ -523,10 +525,14 @@ def watch_problems(ctx):
                         if f["kalshi_live_s"] > 900 else None),
         "poly_feed": (f"the Polymarket feed is {f['poly_feed_s'] // 60} min behind"
                       if f["poly_feed_s"] is not None and f["poly_feed_s"] > 1800 else None),
-        "aggregate": (f"{f['candles_waiting']:,} minutes waiting for their candle, the oldest"
-                      f" {f['oldest_waiting_s'] // 60} min" if f["oldest_waiting_s"] > 3600 else None),
+        # A backlog that is large and not shrinking since the last round:
+        # the aggregator has stopped or cannot keep up.
+        "aggregate": (f"{f['candles_waiting']:,} minutes waiting for their candle, not going down"
+                      if f["candles_waiting"] > 50_000
+                      and f["candles_waiting"] >= ctx["state"].get("waiting", 0) else None),
         "disk": f"only {100 * free / total:.0f}% of the disk free" if free / total < 0.10 else None,
     }
+    ctx["state"]["waiting"] = f["candles_waiting"]
     counts, deprecated, dropped = venue_answers(ctx)
     events = []
     gone = {k: v for k, v in counts.items() if k.endswith("410")}
