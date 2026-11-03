@@ -28,10 +28,11 @@ POLY_HOSTS = (GAMMA, CLOB, DATA)
 KALSHI_BATCH = 100      # tickers per /markets or /markets/candlesticks request
 KALSHI_MAX_CANDLES = 10_000     # market-minutes one candlesticks request may ask for
 POLY_BATCH = 400        # tokens per /midpoints request; the API rejects ~1000
-# The trade lists refuse an offset past POLY_MAX_OFFSET and a page over
-# POLY_MAX_PAGE (see settings.POLY_LIST_SIZES for how they are read).
-POLY_MAX_OFFSET = settings.POLY_MAX_OFFSET
-POLY_MAX_PAGE = 10_000
+# Trade lists (data API v2) come a page of at most this many at a time,
+# followed by cursor however far back they go.
+POLY_PAGE = 1000
+TRADE_FIELDS = ("condition_id", "token_id", "proxy_wallet", "side", "size", "price",
+                "timestamp", "transaction_hash")
 GAMMA_BATCH = 50        # condition ids per /markets request
 
 
@@ -413,14 +414,20 @@ def yes_token(market):
         return None
 
 
-def poly_trades(market=None, offset=0, limit=1000, stop=None):
-    """One page of trades, newest first: every trade on Polymarket, or one
-    market's (a condition id). Each is a taker's order as filled, so a trade is
-    counted once, with the taker's wallet."""
-    params = {"limit": limit, "offset": offset, "takerOnly": "true"}
+def poly_trades(market=None, cursor=None, stop=None):
+    """One page of trades, newest first, as (trades, next cursor or None):
+    every trade on Polymarket, or one market's (a condition id). Pass the
+    cursor from the page before to go on from it. Each is a taker's order as
+    filled, so a trade is counted once, with the taker's wallet. Only the
+    fields poly.row needs are kept."""
+    params = {"taker_only": "true"}
+    params.update({"cursor": cursor} if cursor else {"limit": POLY_PAGE})
     if market:
-        params["market"] = market
-    return call("GET", DATA + "/trades", params=params, timeout=60, attempts=4, stop=stop) or []
+        params["condition"] = market        # sent with every page, as the venue asks
+    data = call("GET", DATA + "/v2/trades", params=params, timeout=60, attempts=4,
+                stop=stop) or {}
+    trades = [{k: t.get(k) for k in TRADE_FIELDS} for t in data.get("data") or []]
+    return trades, (data.get("pagination") or {}).get("next_cursor") or None
 
 
 def poly_prices_history(token, start, end, stop=None):

@@ -5,16 +5,17 @@ backfill.py (history) and the API's pushed backfills. aggregate.py turns the
 stored trades into candles; nothing here makes candles, except the midpoint
 fallback below.
 
-Two ways to read trades, both newest first and both cut off by the venue at
-the newest ~20,000 (see read_list):
+Two ways to read trades (data API v2), both newest first, a page of 1,000 at
+a time followed by cursor (see read_list):
 
-    the feed      every trade on Polymarket -- about 15 a second, so the cut-off
-                  is ~20 minutes back. trades.py reads it every few seconds.
+    the feed      every trade on Polymarket -- about 15 a second. trades.py
+                  reads it every few seconds, back to where it last reached
+                  (at most POLY_FEED_MOST trades).
     one market    every trade in one market. For all but the busiest that is
                   its whole life, in one request.
 
-The venue answers from copies that run 2 to 6 minutes behind, each by its own
-amount, so what a read covers is never taken from the clock:
+What a read covers is never taken from the clock (v1 answered from copies
+running minutes behind; the margins are kept):
 
   - the feed covers up to its newest trade, less POLY_FEED_LAG
   - a market's list covers up to the time it was asked, less POLY_LIST_LAG -- a
@@ -52,65 +53,36 @@ def stamp(ts):
 
 def row(t):
     """The stored row for one of the venue's trades, or None if it lacks
-    something a trade needs."""
+    something a trade needs. The id is the same as for trades read from the
+    v1 API (camelCase fields), so trades stored then are not stored twice."""
     try:
         size, price = float(t["size"]), float(t["price"])
-        ident = "|".join([str(t["transactionHash"]), str(t["asset"]), str(t.get("proxyWallet")),
-                          str(t.get("side")), repr(size), repr(price)])
-        return (t["conditionId"], stamp(int(t["timestamp"])),
-                hashlib.md5(ident.encode()).hexdigest(), str(t["asset"]), t.get("side"),
-                price, size, t.get("proxyWallet"), t.get("transactionHash"))
+        ident = "|".join([str(t["transaction_hash"]), str(t["token_id"]),
+                          str(t.get("proxy_wallet")), str(t.get("side")), repr(size), repr(price)])
+        return (t["condition_id"], stamp(int(t["timestamp"])),
+                hashlib.md5(ident.encode()).hexdigest(), str(t["token_id"]), t.get("side"),
+                price, size, t.get("proxy_wallet"), t.get("transaction_hash"))
     except (KeyError, TypeError, ValueError):
         return None
 
 
-# The page past the largest single request must share this many trades with
-# it: a page from a staler copy of the venue would otherwise skip trades.
-OVERLAP = 50
-DEEP_TRIES = 4
-
-
-def read_list(market, since, stop=None):
+def read_list(market, since, most, stop=None):
     """A trade list -- one market's, or with `market` None the feed of every
     trade -- newest first, back to `since` (unix time, or None for as far as
-    it goes). Returns (trades, reached): `reached` is False if the list was cut
-    off before getting there.
+    it goes) but no more than about `most` trades. Returns (trades, reached):
+    `reached` is False if it stopped at `most` before getting there.
 
-    The venue answers each request from one of several copies, each running
-    a few minutes behind by its own amount, so pages from different requests
-    do not line up. The list is read as one request from the newest trade,
-    asked again larger until it reaches far enough (settings.POLY_LIST_SIZES):
-    every answer is whole. Only past the largest is a second page read, at an
-    offset, and it must overlap the first or it is asked for again."""
-    out = []
-    for size in settings.POLY_LIST_SIZES:
-        out = venues.poly_trades(market, 0, size, stop)
-        if len(out) < size or (since is not None and out and int(out[-1]["timestamp"]) < since):
+    Pages after the first follow the venue's cursor, which carries the
+    (time, sequence) of the last trade read: each page goes on strictly
+    below the one before, so pages neither overlap nor leave holes."""
+    out, cursor = [], None
+    while True:
+        page, cursor = venues.poly_trades(market, cursor, stop)
+        out += page
+        if not cursor or not page or (since is not None and int(page[-1]["timestamp"]) < since):
             return out, True
-    seen = {_key(t) for t in out}
-    offset = min(venues.POLY_MAX_OFFSET, len(out) - OVERLAP)
-    size = min(settings.POLY_LIST_SIZES[-1], venues.POLY_MAX_PAGE)
-    for _ in range(DEEP_TRIES):
-        page = venues.poly_trades(market, offset, size, stop)
-        if not page:
-            return out, True
-        if any(_key(t) in seen for t in page):
-            break
-        if stop is not None and stop.wait(2):
+        if len(out) >= most:
             return out, False
-    else:
-        log.warning("trade list of %s: the page past %s trades never overlapped; stopping there",
-                    market or "the feed", f"{len(out):,}")
-        return out, False
-    out += [t for t in page if _key(t) not in seen]
-    if len(page) < size or (since is not None and int(page[-1]["timestamp"]) < since):
-        return out, True
-    return out, False
-
-
-def _key(t):
-    return (t.get("transactionHash"), t.get("asset"), t.get("proxyWallet"), t.get("side"),
-            t.get("size"), t.get("price"))
 
 
 def write_trades(cur, trades):
@@ -146,7 +118,7 @@ def read_market(cid, since, stop=None):
     will list, newest first. Returns (trades, whole): `whole` is True if the
     list reached `since` or the market's first trade, False if it was cut off
     -- then nothing older than its oldest trade can be had this way."""
-    return read_list(cid, since, stop)
+    return read_list(cid, since, settings.POLY_MARKET_MOST, stop)
 
 
 def fetch_market(cid, stop=None, since=None):
@@ -262,7 +234,7 @@ def feed_state():
 def read_feed(since, stop=None):
     """The feed back to `since` (unix time), newest first, or as far as it
     goes. Returns (trades, reached)."""
-    return read_list(None, since, stop)
+    return read_list(None, since, settings.POLY_FEED_MOST, stop)
 
 
 def poll_feed(stop=None, overlap=30):

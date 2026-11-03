@@ -22,8 +22,8 @@ alongside discover.py and live.py without ever pushing the total over it.
 
 Polymarket (--venue poly, or both with --venue all): a market's history is its
 trade list, read once, newest first, back to its start -- one request for all
-but the busiest. The venue lists at most ~20,000 trades per market; for the
-few with more, the time before the oldest it lists is filled from the
+but the busiest. A market is read back at most POLY_MARKET_MOST trades
+(200,000); for the few with more, the time before the oldest read is filled from the
 per-minute order-book midpoint (candles marked source 'mid'). The markets
 take the same selection options, by condition id (--ticker), event id
 (--event) and --open / --closed; --series and --category are Kalshi's only.

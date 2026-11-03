@@ -8,9 +8,9 @@ Two loops, each in its own thread:
     feed     every POLY_FEED_SECONDS, the feed of every Polymarket trade is
              read back to where the last read reached, and stored. A few
              requests a minute cover every market on the venue, however many
-             there are. If the feed has moved on further than it lists
-             (~20,000 trades, ~20 minutes) since the last read, the gap is
-             recorded and the feed starts again from what it can reach.
+             there are. If the feed has moved on further than one read goes
+             (POLY_FEED_MOST trades, ~1.5 hours) since the last, the gap is
+             recorded and the feed starts again from what it reached.
     catch-up markets that traded where their coverage does not reach -- inside
              a gap, or while this was stopped -- are read one by one, busiest
              first, at a lower priority than the feed.

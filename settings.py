@@ -82,10 +82,14 @@ BACKFILL_DAYS = _num("BACKFILL_DAYS", 30)
 # inside them, and a 429 halves it as on Kalshi.
 POLY_REQUESTS_PER_MIN = _num("POLY_REQUESTS_PER_MIN", 300)
 POLY_MAX_PER_SECOND = _num("POLY_MAX_PER_SECOND", 8, float)
-# trades.py reads the feed of every trade on Polymarket this often. The feed
-# reaches back 10,000 trades (about ten minutes); a longer gap is caught up
-# market by market.
+# trades.py reads the feed of every trade on Polymarket this often, back to
+# where the last read reached but no further than POLY_FEED_MOST trades (about
+# an hour and a half); a longer gap is caught up market by market.
 POLY_FEED_SECONDS = _num("POLY_FEED_SECONDS", 15, float)
+POLY_FEED_MOST = _num("POLY_FEED_MOST", 100_000)
+# One market's trades are read back no further than this many in one go
+# (memory); history older than that comes from midpoints (poly.fill_mid).
+POLY_MARKET_MOST = _num("POLY_MARKET_MOST", 200_000)
 # A trade can reach the feed a little after it happened: coverage is claimed
 # only up to this long before each read.
 POLY_FEED_LAG = _num("POLY_FEED_LAG_SECONDS", 30)
@@ -94,13 +98,6 @@ POLY_FEED_LAG = _num("POLY_FEED_LAG_SECONDS", 30)
 # minutes). A market that has not traded lately says nothing about the age of
 # the copy that answered.
 POLY_LIST_LAG = _num("POLY_LIST_LAG_SECONDS", 900)
-# How the trade lists are read: one request from the newest trade, of each of
-# these sizes in turn until it reaches back far enough -- one request is one
-# copy of the venue, so it never has a hole -- then, past the largest, one more
-# page at an offset (the venue refuses offsets past POLY_MAX_OFFSET). That
-# reaches the newest ~20,000 trades; tests shrink both to make gaps quickly.
-POLY_LIST_SIZES = [int(x) for x in _list("POLY_LIST_SIZES")] or [1000, 4000, 10_000]
-POLY_MAX_OFFSET = _num("POLY_MAX_OFFSET", 10_000)
 # Where Polymarket is (the tests point these at a simulated one).
 POLY_GAMMA_URL = os.environ.get("POLY_GAMMA_URL", "").strip() or "https://gamma-api.polymarket.com"
 POLY_CLOB_URL = os.environ.get("POLY_CLOB_URL", "").strip() or "https://clob.polymarket.com"

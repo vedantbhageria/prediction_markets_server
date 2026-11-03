@@ -78,8 +78,9 @@ trades, which it publishes one by one with their size and the taker's wallet.
 
 **trades.py** reads the feed of every trade on Polymarket every
 `POLY_FEED_SECONDS` (15) -- about 900 trades a minute, a few requests -- and
-stores them in `poly_trades`. The feed reaches back ~20,000 trades (about 20
-minutes); after a longer gap it starts again, and markets that traded in the
+stores them in `poly_trades`, from Polymarket's data API v2 (v1 was retired on
+2 Nov 2026). One read goes back at most `POLY_FEED_MOST` trades (100,000, about
+1.5 hours); after a longer gap it starts again, and markets that traded in the
 gap (discovery saw their volume rise) are read one by one.
 
 **aggregate.py** turns stored trades into one-minute candles in `poly_candles`:
@@ -88,8 +89,8 @@ the price of the market's first outcome (a trade in the other at p counts as
 stretch again.
 
 **backfill.py --venue poly** reads each market's trade list once, back to its
-start: one request for all but the busiest. Polymarket lists at most ~20,000
-trades per market; older history of the few busier ones is filled from its
+start: one request for all but the busiest. A market is read back at most
+`POLY_MARKET_MOST` trades (200,000); older history of the few busier ones is filled from its
 per-minute order-book midpoint, as candles marked `source = 'mid'` (one
 price, no volume).
 

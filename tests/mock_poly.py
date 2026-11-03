@@ -6,7 +6,8 @@ One server answers for all three of Polymarket's hosts -- point
 POLY_GAMMA_URL, POLY_CLOB_URL and POLY_DATA_URL at it:
 
     gamma   /events/keyset, /markets          the listing, with volumes
-    data    /trades                           the feed, or one market's trades
+    data    /v2/trades                        the feed, or one market's trades
+            (/trades, v1, answers 410 as the real one does since 2 Nov 2026)
     clob    /prices-history                   per-minute midpoints
 
 Some 2,000 made-up markets trade deterministically from (seed, market,
@@ -16,7 +17,8 @@ Made to be awkward in the ways the real one is:
   - every answer comes from a copy running 3 to 20 s behind (a different
     amount each time), so two requests a second apart can disagree about
     what has happened
-  - trade lists refuse an offset past MAX_OFFSET and a page past MAX_PAGE
+  - trade lists come a page of at most MAX_PAGE, then by cursor; v1's
+    parameters (market, offset) are refused
   - total volume runs LISTING_LAG behind the trades, and "stale" markets never
     update their total at all -- only their 24-hour volume moves
   - markets start during the run, and some closed hours ago
@@ -28,6 +30,7 @@ returns every trade of a market in a window, to check against.
 """
 
 import argparse
+import base64
 import bisect
 import json
 import random
@@ -40,8 +43,7 @@ from urllib.parse import parse_qs, urlparse
 SEED = 20261102
 LISTING_LAG = 30            # total volume trails the trades by this much
 LAG_MIN, LAG_MAX = 3, 20    # how far behind each answering copy runs
-MAX_OFFSET = 10_000
-MAX_PAGE = 10_000
+MAX_PAGE = 1000
 
 # kind: (chance a minute has trades, most trades in such a minute, count)
 KINDS = {"hot": (1.0, 20, 60), "huge": (1.0, 50, 3), "warm": (0.3, 3, 300),
@@ -57,6 +59,11 @@ def mix(a, b):
     x ^= x >> 27
     x = (x * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
     return (x ^ (x >> 31)) & 0xFFFFFFFF
+
+
+def order(t):
+    """The venue's order: newest first, ties by hash."""
+    return (-t["timestamp"], t["transaction_hash"])
 
 
 class Universe:
@@ -118,13 +125,13 @@ class Universe:
             p = min(0.999, max(0.001, self.price(m, minute) + r.uniform(-0.01, 0.01)))
             price = round(p if yes else 1 - p, 3)
             out.append({
-                "proxyWallet": "0x" + format(r.getrandbits(160), "040x"),
+                "proxy_wallet": "0x" + format(r.getrandbits(160), "040x"),
                 "side": "BUY" if r.random() < 0.55 else "SELL",
-                "asset": m["yes"] if yes else m["no"], "conditionId": m["cid"],
+                "token_id": m["yes"] if yes else m["no"], "condition_id": m["cid"],
                 "size": round(r.uniform(1, 500), 2), "price": price, "timestamp": ts,
                 "title": m["question"], "slug": f"thing-{i}", "outcome": "Yes" if yes else "No",
-                "outcomeIndex": 0 if yes else 1,
-                "transactionHash": "0x" + format(r.getrandbits(256), "064x"),
+                "outcome_index": 0 if yes else 1,
+                "transaction_hash": "0x" + format(r.getrandbits(256), "064x"),
                 "name": f"trader{r.randrange(500)}", "pseudonym": "Made-Up-Trader"})
         out.sort(key=lambda t: t["timestamp"])
         return tuple(out)
@@ -135,27 +142,23 @@ class Universe:
         out = []
         for m in self.trading:
             out += self.minute_trades(m["i"], minute)
-        out.sort(key=lambda t: (-t["timestamp"], t["transactionHash"]))
+        out.sort(key=order)
         return tuple(out)
 
-    def feed(self, cutoff, offset, limit):
-        """Newest first, up to `cutoff`."""
-        out, need, minute = [], offset + limit, cutoff // 60
-        floor = min(m["start"] for m in self.markets) // 60
-        while len(out) < need and minute >= floor:
-            out += [t for t in self.feed_minute(minute) if t["timestamp"] <= cutoff]
+    def page(self, m, cutoff, anchor, limit):
+        """A page of the feed (m None) or of one market's trades, newest first:
+        up to `cutoff` for the first page, else strictly after `anchor` (the
+        (time, hash) of the last trade of the page before). Returns (trades,
+        more)."""
+        floor = (min(x["start"] for x in self.markets) if m is None else m["start"] - 60) // 60
+        out, minute = [], (anchor[0] if anchor else cutoff) // 60
+        while len(out) <= limit and minute >= floor:
+            trades = (self.feed_minute(minute) if m is None
+                      else sorted(self.minute_trades(m["i"], minute), key=order))
+            out += [t for t in trades
+                    if (order(t) > (-anchor[0], anchor[1]) if anchor else t["timestamp"] <= cutoff)]
             minute -= 1
-        return out[offset:offset + limit]
-
-    def market_trades(self, m, cutoff, offset=0, limit=None):
-        """One market's trades, newest first, up to `cutoff`."""
-        out, minute = [], cutoff // 60
-        need = None if limit is None else offset + limit
-        while (need is None or len(out) < need) and minute * 60 >= m["start"] - 60:
-            out += [t for t in reversed(self.minute_trades(m["i"], minute))
-                    if t["timestamp"] <= cutoff]
-            minute -= 1
-        return out[offset:] if limit is None else out[offset:offset + limit]
+        return out[:limit], len(out) > limit
 
     def truth(self, m, lo, hi):
         """Every trade of the market with lo <= ts < hi, oldest first."""
@@ -250,14 +253,33 @@ class Handler(BaseHTTPRequestHandler):
         now = time.time()
         cutoff = int(now - random.uniform(LAG_MIN, LAG_MAX))
         if path == "/trades":
-            offset, limit = int(q.get("offset", 0)), int(q.get("limit", 100))
-            if offset > MAX_OFFSET:
-                return self.send(400, {"error": f"max historical trades offset of {MAX_OFFSET} exceeded"})
-            limit = min(limit, MAX_PAGE)
-            if q.get("market"):
-                m = u.by_cid.get(q["market"])
-                return self.send(200, u.market_trades(m, cutoff, offset, limit) if m else [])
-            return self.send(200, u.feed(cutoff, offset, limit))
+            return self.send(410, {"error": "Data API v1 has been retired",
+                                   "migration": "https://data-api.polymarket.com/v2/"})
+        if path == "/v2/trades":
+            bad = [k for k in ("market", "offset", "takerOnly") if k in q]
+            if bad:
+                return self.send(400, {"error": f"unknown parameter {bad[0]}"})
+            if q.get("cursor"):
+                c = json.loads(base64.urlsafe_b64decode(q["cursor"]))
+                anchor, limit = (c["ts"], c["h"]), c["l"]
+            else:
+                anchor, limit = None, int(q.get("limit", 100))
+                if not 0 <= limit <= MAX_PAGE:
+                    return self.send(400, {"error": f"limit must be between 0 and {MAX_PAGE}"})
+            m = None
+            if q.get("condition"):
+                m = u.by_cid.get(q["condition"])
+                if m is None:
+                    return self.send(200, {"data": [], "pagination": {
+                        "limit": limit, "offset": 0, "has_more": False, "next_cursor": None}})
+            rows, more = u.page(m, cutoff, anchor, limit)
+            cursor = None
+            if more and rows:
+                cursor = base64.urlsafe_b64encode(json.dumps(
+                    {"ts": rows[-1]["timestamp"], "h": rows[-1]["transaction_hash"], "l": limit}
+                ).encode()).decode()
+            return self.send(200, {"data": rows, "pagination": {
+                "limit": limit, "offset": 0, "has_more": more, "next_cursor": cursor}})
         if path == "/events/keyset":
             closed = q.get("closed") == "true"
             end_min = q.get("end_date_min")
