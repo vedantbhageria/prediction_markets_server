@@ -1330,16 +1330,16 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
 
     Each venue gives its best offset + limit rows in the page's order, walking
     an index; the page is the merge of the two. Sorted by candles, the markets
-    with candles come from the counts views (indexed by count) and those
-    without after them, in id order."""
+    with candles come from the counts views (indexed by count); those without
+    are read only when the page gets past the last market with candles."""
     counts_ready()
     like = f"%{q}%" if q else None
     n = offset + limit
-    parts = []
+    with_parts, without_parts, parts = [], [], []
 
-    def part(template, source, key, order, cond, args):
-        parts.append((template.format(source=source, key=key, order=order,
-                                      where=" AND ".join(cond)), args + [n]))
+    def part(into, template, source, key, order, cond, args):
+        into.append((template.format(source=source, key=key, order=order,
+                                     where=" AND ".join(cond)), args + [n]))
 
     for v, template, key_col, title, cid, counts, closed in (
             ("kalshi", MANAGE_KALSHI, "m.ticker", "m.title", "m.ticker", "kalshi_candle_counts",
@@ -1349,7 +1349,8 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
         if venue not in ("both", v):
             continue
         markets = "kalshi_markets m" if v == "kalshi" else "poly_markets p"
-        join = "c.ticker = m.ticker" if v == "kalshi" else "c.condition_id = p.condition_id"
+        idcol = key_col.split(".")[1]
+        join = f"c.{idcol} = {key_col}"
         cond, args = ["true"], []
         if category:
             cond.append("e.category = %s"); args.append(category)
@@ -1359,31 +1360,48 @@ def _manage_rows(venue, state, category, sort, q, limit, offset=0):
             cond.append(f"NOT ({closed})")
         elif state == "expired":
             cond.append(closed)
+        # "Has candles" asked as EXISTS: as a filter on a LEFT JOIN the planner
+        # expects almost no rows without candles, and sorts all of them.
+        has = f"EXISTS (SELECT 1 FROM {counts} x WHERE x.{idcol} = {key_col})"
         with_counts = f"{counts} c JOIN {markets} ON {join}"
-        without = f"{markets} LEFT JOIN {counts} c ON {join}"
+        with_any = f"{markets} LEFT JOIN {counts} c ON {join}"
+        no_counts = (f"{markets} CROSS JOIN LATERAL (SELECT NULL::bigint AS n,"
+                     " NULL::timestamptz AS first_ts, NULL::timestamptz AS last_ts) c")
         if sort == "candles":
             # (counts_n_idx is (n DESC, id): the order must be exactly that)
             if state != "nodata":
-                part(template, with_counts, "c.n", f"c.n DESC, c.{key_col.split('.')[1]}", cond, args)
+                part(with_parts, template, with_counts, "c.n", f"c.n DESC, c.{idcol}", cond, args)
             if state != "withdata":
-                part(template, without, "NULL::bigint", key_col, cond + ["c.n IS NULL"], args)
+                part(without_parts, template, no_counts, "NULL::bigint", key_col,
+                     cond + [f"NOT {has}"], args)
             continue
         key = MANAGE_SORTS[sort][0 if v == "kalshi" else 1]
-        extra = {"withdata": ["c.n IS NOT NULL"], "nodata": ["c.n IS NULL"]}.get(state, [])
+        extra = {"withdata": [has], "nodata": [f"NOT {has}"]}.get(state, [])
         if key:
-            part(template, without, key, f"{key} DESC NULLS LAST, {key_col}", cond + extra, args)
+            part(parts, template, with_any, key, f"{key} DESC NULLS LAST, {key_col}",
+                 cond + extra, args)
         else:                       # Polymarket has no open time: its markets by id
-            part(template, without, "NULL::timestamptz", key_col, cond + extra, args)
+            part(parts, template, with_any, "NULL::timestamptz", key_col, cond + extra, args)
 
-    if not parts:
-        return []
-    order = {"candles": "candles DESC NULLS LAST", "volume": "volume DESC NULLS LAST",
-             "close": "k DESC NULLS LAST", "open": "k DESC NULLS LAST"}[sort]
-    # A stable tiebreak keeps paging from repeating or skipping rows when the
-    # sort column has ties (it usually does -- volume 0, no candles).
-    sql = ("SELECT * FROM (" + " UNION ALL ".join(f"({s})" for s, _ in parts)
-           + f") x ORDER BY {order}, id LIMIT %s OFFSET %s")
-    rows = db.query(sql, tuple(a for _, args in parts for a in args) + (limit, offset))
+    def page(chosen, order, count, skip):
+        if not chosen or count <= 0:
+            return []
+        # A stable tiebreak keeps paging from repeating or skipping rows when
+        # the sort column has ties (it usually does -- volume 0, no candles).
+        sql = ("SELECT * FROM (" + " UNION ALL ".join(f"({s})" for s, _ in chosen)
+               + f") x ORDER BY {order}, id LIMIT %s OFFSET %s")
+        return db.query(sql, tuple(a for _, args in chosen for a in args) + (count, skip))
+
+    if sort == "candles":
+        rows = page(with_parts, "candles DESC", n, 0)
+        if len(rows) < n:           # past the last market with candles
+            rows += page(without_parts, "id", n - len(rows), 0)
+        rows = rows[offset:n]
+    else:
+        order = {"volume": "volume DESC NULLS LAST", "close": "k DESC NULLS LAST",
+                 "open": "k DESC NULLS LAST"}[sort]
+        rows = page(parts, order, limit, offset)
+
     # Kalshi's short outcome name lives in the stored listing; read it only for
     # the rows shown, not for every market the query sorted.
     ids = [r["id"] for r in rows if r["venue"] == "kalshi"]
