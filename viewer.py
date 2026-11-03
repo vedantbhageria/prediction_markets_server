@@ -1638,6 +1638,12 @@ STATUS_PAGE = """
  .tile.bad { border-left-color: #d9534f; } .tile.bad b { color: var(--bad); }
  h3.section { font-size: 17px; margin: 28px 0 0; padding-top: 14px; border-top: 2px solid var(--ink); }
  h3.section small { color: var(--faint); font-weight: normal; font-size: 13px; margin-left: 8px; }
+ .vtag { display: inline-block; color: #fff; font-size: 12px; font-weight: 700; padding: 1px 8px;
+         border-radius: 4px; margin-right: 6px; vertical-align: 2px; }
+ .vtag.k { background: #2a6099; } .vtag.p { background: #99542a; } .vtag.s { background: #666; }
+ h4.vhead { margin: 14px 0 6px; font-size: 14px; }
+ .tiles.k .tile { background: rgba(42, 96, 153, 0.09); }
+ .tiles.p .tile { background: rgba(153, 84, 42, 0.10); }
  .col { border: 1px solid var(--line); border-radius: 6px; padding: 12px 16px; margin-top: 12px; min-width: 0; }
  .col h4 { margin: 0 0 8px; font-size: 14px; }
  .col h4 small { color: var(--faint); font-weight: normal; font-size: 12px; margin-left: 6px; }
@@ -1687,33 +1693,48 @@ STATUS_PAGE = """
   &middot; <span class="muted">as of <span id="asof">{{ now }}</span></span>
 </div>
 <div id="live">
-<div class="jump"><a href="#live">live ingestion</a><a href="#backfill">backfill</a><a href="#budget">Kalshi budget</a><a href="#poly">Polymarket</a><a href="#check">daily check</a><a href="#discovery">discovery</a><a href="#database">database</a><a href="#api">API</a></div>
+<div class="jump"><a href="#klive">Kalshi live</a><a href="#backfill">Kalshi backfill</a><a href="#budget">Kalshi budget</a><a href="#poly">Polymarket history</a><a href="#check">daily check</a><a href="#discovery">Kalshi scans</a><a href="#database">database</a><a href="#api">API</a></div>
 
-<div class="tiles">
+<h4 class="vhead"><span class="vtag k">Kalshi</span>live candles from Kalshi's candle endpoint</h4>
+<div class="tiles k">
   <div class="tile {{ 'bad' if c.down else 'good' }}"><b>{{ 'down' if c.down else 'up' }}</b>
-    <span>Kalshi{% if c.down %} &middot; since {{ c.down }}{% endif %}</span></div>
+    <span>Kalshi API{% if c.down %} &middot; since {{ c.down }}{% endif %}</span></div>
   <div class="tile {{ 'good' if c.live and c.live.behind < 240 else 'warn' if c.live and c.live.behind < 900 else 'bad' }}">
     <b>{{ (c.live.behind|string + ' s') if c.live else '—' }}</b><span>live candles behind the clock</span></div>
   <div class="tile"><b>{{ '{:,}'.format(c.live.candles) if c.live else '—' }}</b>
     <span>candles in live's last cycle{% if c.live %} &middot; {{ c.live.seconds }} s{% endif %}</span></div>
   <div class="tile"><b>{{ '{:,}'.format(c.hot.n) if c.hot else '—' }}</b><span>hot markets, fetched every minute</span></div>
   <div class="tile {{ 'warn' if c.factor and c.factor < 1 else '' }}"><b>{{ c.used_now }}<span style="font-size:14px;color:var(--faint)"> / {{ c.limit }}</span></b>
-    <span>Kalshi requests last minute{% if c.factor and c.factor < 1 %} &middot; cut to {{ '%.0f'|format(100 * c.factor) }}%{% endif %}</span></div>
-  <div class="tile {{ 'good' if bf.left == 0 else '' }}"><b>{{ ('%.1f'|format(bf.pct) + '%') if bf.left is not none else '—' }}</b><span>backfill done</span></div>
-</div>
-<div class="tiles">
-  <div class="tile"><b>{{ d.size }}</b><span>database on disk</span></div>
+    <span>requests last minute{% if c.factor and c.factor < 1 %} &middot; cut to {{ '%.0f'|format(100 * c.factor) }}%{% endif %}</span></div>
+  <div class="tile {{ 'good' if bf.left == 0 else '' }}"><b>{{ ('%.1f'|format(bf.pct) + '%') if bf.left is not none else '—' }}</b><span>of markets have their history</span></div>
   <div class="tile"><b>{{ d.candles }}</b><span>candles stored</span></div>
   <div class="tile"><b>{{ d.markets }}</b><span>markets &middot; {{ d.open }} open</span></div>
+</div>
+<h4 class="vhead"><span class="vtag p">Polymarket</span>every trade from the data API; candles made from them</h4>
+<div class="tiles p">
+  <div class="tile {{ 'bad' if p.down else 'good' }}"><b>{{ 'down' if p.down else 'up' }}</b>
+    <span>Polymarket API &middot; {{ 'through the VPN' if p.route == 'vpn' else 'direct' }}</span></div>
+  <div class="tile {{ 'good' if p.behind is not none and p.behind < 600 else 'warn' if p.behind is not none and p.behind < 1800 else 'bad' if p.behind is not none else '' }}">
+    <b>{{ (p.behind|string + ' s') if p.behind is not none else '—' }}</b><span>trade feed behind the clock &middot; claimed 30 s behind its newest trade</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(p.recent) if p.recent is not none else '—' }}</b><span>trades stored in the last 5 min</span></div>
+  <div class="tile {{ 'warn' if p.behind_markets else '' }}"><b>{{ '{:,}'.format(p.behind_markets) if p.behind_markets is not none else '—' }}</b><span>markets to catch up after a gap</span></div>
+  <div class="tile {{ 'warn' if p.waiting and p.waiting > 5000 else '' }}"><b>{{ '{:,}'.format(p.waiting) if p.waiting is not none else '—' }}</b><span>minutes waiting for their candle</span></div>
+  <div class="tile"><b>{{ p.used }}<span style="font-size:14px;color:var(--faint)"> / {{ p.limit }}</span></b><span>requests last minute</span></div>
+  <div class="tile {{ 'good' if p.tracked and p.left == 0 else '' }}"><b>{{ ('%.1f'|format(p.pct) + '%') if p.tracked else '—' }}</b><span>of markets have their history</span></div>
+  <div class="tile"><b>{{ p.trades or '—' }}</b><span>trades stored</span></div>
+</div>
+<h4 class="vhead"><span class="vtag s">Server</span>shared by both venues</h4>
+<div class="tiles">
+  <div class="tile"><b>{{ d.size }}</b><span>database on disk</span></div>
   <div class="tile"><b>{{ d.connections }}</b><span>database connections in use</span></div>
   {% if not missing %}
-  <div class="tile"><b>{{ '{:,}'.format(t.n) }}</b><span>API requests &middot; {{ window }}</span></div>
+  <div class="tile"><b>{{ '{:,}'.format(t.n) }}</b><span>requests to our API &middot; {{ window }}</span></div>
   <div class="tile {{ 'bad' if t.errors else 'good' }}"><b>{{ '{:,}'.format(t.errors) }}</b>
-    <span>API errors &middot; typical {{ ms(t.p50) }}</span></div>
+    <span>our API errors &middot; typical {{ ms(t.p50) }}</span></div>
   {% endif %}
 </div>
 
-<h3 class="section" id="live">Live ingestion <small>live.py: hot markets every minute, others once they trade</small></h3>
+<h3 class="section" id="klive"><span class="vtag k">Kalshi</span>Live candles <small>live.py: hot markets every minute, others once they trade</small></h3>
 <div class="two">
   <div class="col">
     <h4>Candles written per minute</h4>
@@ -1727,7 +1748,7 @@ STATUS_PAGE = """
   </div>
 </div>
 
-<h3 class="section" id="backfill">Backfill <small>backfill.py: every market's history, on leftover budget</small></h3>
+<h3 class="section" id="backfill"><span class="vtag k">Kalshi</span>Backfill <small>backfill.py: every market's history, on leftover budget</small></h3>
 <div class="col">
   {% if bf.left is not none %}
   <div class="two" style="gap:24px;align-items:center">
@@ -1744,7 +1765,7 @@ STATUS_PAGE = """
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
 </div>
 
-<h3 class="section" id="budget">Kalshi request budget <small>every program together &middot; dashed line = the limit</small></h3>
+<h3 class="section" id="budget"><span class="vtag k">Kalshi</span>Request budget <small>every program together &middot; dashed line = the limit</small></h3>
 <div class="col">
   {{ m.budget_chart|safe }}
   <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
@@ -1752,17 +1773,7 @@ STATUS_PAGE = """
     {% if m.down %}<i style="background:var(--down)"></i>Kalshi unreachable{% endif %}</div>
 </div>
 
-<h3 class="section" id="poly">Polymarket <small>trades.py reads every trade; aggregate.py makes the candles</small></h3>
-<div class="tiles">
-  <div class="tile {{ 'bad' if p.down else 'good' }}"><b>{{ 'down' if p.down else 'up' }}</b>
-    <span>Polymarket &middot; {{ 'through the VPN' if p.route == 'vpn' else 'direct' }}</span></div>
-  <div class="tile {{ 'good' if p.behind is not none and p.behind < 600 else 'warn' if p.behind is not none and p.behind < 1800 else 'bad' if p.behind is not none else '' }}">
-    <b>{{ (p.behind|string + ' s') if p.behind is not none else '—' }}</b><span>trade feed behind the clock &middot; claimed 30 s behind its newest trade</span></div>
-  <div class="tile"><b>{{ '{:,}'.format(p.recent) if p.recent is not none else '—' }}</b><span>trades stored in the last 5 min</span></div>
-  <div class="tile {{ 'warn' if p.behind_markets else '' }}"><b>{{ '{:,}'.format(p.behind_markets) if p.behind_markets is not none else '—' }}</b><span>markets to catch up after a gap</span></div>
-  <div class="tile {{ 'warn' if p.waiting and p.waiting > 5000 else '' }}"><b>{{ '{:,}'.format(p.waiting) if p.waiting is not none else '—' }}</b><span>minutes waiting for their candle</span></div>
-  <div class="tile"><b>{{ p.used }}<span style="font-size:14px;color:var(--faint)"> / {{ p.limit }}</span></b><span>Polymarket requests last minute</span></div>
-</div>
+<h3 class="section" id="poly"><span class="vtag p">Polymarket</span>History <small>trades.py reads each market's past trades; aggregate.py makes the candles</small></h3>
 <div class="col">
   {% if p.tracked %}
   <div class="big">{{ '%.1f'|format(p.pct) }}% <span style="font-size:14px;font-weight:normal;color:var(--muted)">of Polymarket markets have their history</span></div>
@@ -1772,7 +1783,7 @@ STATUS_PAGE = """
   {% else %}<span class="muted">no Polymarket markets tracked yet: discovery adds them on its next pass</span>{% endif %}
 </div>
 
-<h3 class="section" id="check">Daily check <small>check.py, every day at 09:00 UTC: is yesterday's data right, complete and current?</small></h3>
+<h3 class="section" id="check"><span class="vtag k">Kalshi</span><span class="vtag p">Polymarket</span>Daily check <small>check.py, every day at 09:00 UTC: is yesterday's data right, complete and current?</small></h3>
 <div class="col scroll">
   {% if checks %}
   <div class="muted" style="font-size:13px;margin-bottom:6px">last run {{ when(checks[0].run_at) }} &middot; pushed to your phone through ntfy</div>
@@ -1785,7 +1796,7 @@ STATUS_PAGE = """
   {% else %}<span class="muted">no run yet: the first is at 09:00 UTC (or run <code>python check.py --now</code>)</span>{% endif %}
 </div>
 
-<h3 class="section" id="discovery">Discovery and scoring <small>discover.py lists every market; activity.py scores each scan</small></h3>
+<h3 class="section" id="discovery"><span class="vtag k">Kalshi</span>Discovery scans <small>discover.py lists every Kalshi market; activity.py scores each scan</small></h3>
 <div class="col scroll">
   <table>
     <tr><th>scan</th><th>started</th><th>listing took</th><th>scored</th></tr>
@@ -1796,10 +1807,10 @@ STATUS_PAGE = """
   </table>
 </div>
 
-<h3 class="section" id="database">Database <small>PostgreSQL with TimescaleDB</small></h3>
+<h3 class="section" id="database"><span class="vtag s">Server</span>Database <small>PostgreSQL with TimescaleDB</small></h3>
 <div class="two">
   <div class="col">
-    <h4>Candles stored <small>every 10 minutes</small></h4>
+    <h4><span class="vtag k">Kalshi</span>Candles stored <small>every 10 minutes</small></h4>
     {{ m.stored_chart|safe }}
     <div class="axis"><span>{{ first_label }}</span><span>now</span></div>
   </div>
@@ -1812,7 +1823,7 @@ STATUS_PAGE = """
   </div>
 </div>
 
-<h3 class="section" id="api">API <small>who calls it, and how fast it answers</small></h3>
+<h3 class="section" id="api"><span class="vtag s">Server</span>API <small>who calls it, and how fast it answers</small></h3>
 {% if missing %}
 <div class="col muted">No API requests recorded yet.</div>
 {% else %}
