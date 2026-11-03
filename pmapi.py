@@ -232,22 +232,26 @@ class Client:
         return df.pivot(index="ts", columns="ticker", values=field)
 
     def similar(self, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
-                max_days=None, max_level=None, gates=None):
+                max_days=None, max_level=None, gates=None, w_wording=1.0, w_days=0.10,
+                w_strike=0.50, w_opposite=0.05, w_name=0.40):
         """The markets nearest to this one, nearest first, as a DataFrame.
 
         venue: "kalshi", "poly" or "all". status: "open", "closed" or "all".
         max_cosine: largest text distance (0 = same wording). max_days:
         largest gap between the dates the questions turn on. max_level:
         largest relative gap between thresholds (0.1 = 10%). gates: "subject"
-        and/or "keywords" to drop near-misses. Columns: text, days, level,
+        and/or "keywords" to drop near-misses. The w_* weights set how much
+        each gap counts in the ranking (0 leaves it out; w_name=0 is the
+        ranking from before names counted). Columns: text, days, level,
         opposite, name (how far apart the named outcomes are), the combined
-        distance, and `relation` (identical,
-        complement, nested, overlapping, same_outcome, related)."""
+        distance, and `relation` (identical, complement, nested,
+        overlapping, same_outcome, related)."""
         if gates is not None and not isinstance(gates, str):
             gates = ",".join(gates)
         r = self._get(f"/v1/markets/{ticker}/similar", limit=limit, venue=venue, status=status,
                       max_cosine=max_cosine, max_days=max_days, max_level=max_level,
-                      gates=gates, format=_WIRE)
+                      gates=gates, w_wording=w_wording, w_days=w_days, w_strike=w_strike,
+                      w_opposite=w_opposite, w_name=w_name, format=_WIRE)
         return self._frame(r, "markets")
 
     def trades(self, condition_id, start=None, end=None, max_rows=None, limit=None):

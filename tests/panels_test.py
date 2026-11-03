@@ -1,4 +1,5 @@
-"""The viewer's related-wording and nearby-markets panels. Run on the server:
+"""The viewer's market panels: title matching and the odds / expiry filter.
+Run on the server:
 
     .venv/bin/python tests/panels_test.py          # about half a minute
 
@@ -7,16 +8,15 @@ discovery's own code, and checks:
 
   1  kalshi_titles holds every title discovery writes, once; prune drops the
      titles no market carries any more
-  2  related wording: the fast search (nearest distinct titles first) picks
-     the same markets in the same order as scoring every market, for several
-     markets and thresholds
+  2  (title matching's ranking is tests/similar_test.py's; here only that
+     its feed answers, in 5)
   3  nearby by expiry: exactly the markets in the category closing inside the
      window, nearest first
   4  nearby by odds: a market's price is its newest candle when that is newer
      than the listing, else the listing's last price; only open markets inside
      the points band; expiry + odds together; other categories when asked
   5  the pages: a market page renders both panels without waiting for them,
-     /related and /nearby answer, and an old link asking for strike gets expiry
+     /matching and /nearby answer, and an old link asking for strike gets expiry
 """
 
 import os
@@ -145,38 +145,6 @@ def test_titles():
           f"1 prune drops a title no market carries, and only that one: {dropped}")
 
 
-def brute_related(ticker, threshold, per):
-    """Every market scored against the anchor: the slow, obvious answer."""
-    text = db.query("SELECT title FROM kalshi_markets WHERE ticker = %s", (ticker,))[0]["title"]
-    rows = db.query("""
-        SELECT DISTINCT ON (title) ticker, title, volume, similarity(title, %s) AS score
-        FROM kalshi_markets WHERE ticker <> %s ORDER BY title, volume DESC NULLS LAST""",
-                    (text, ticker))
-    rows = [r for r in rows if r["score"] >= threshold]
-    rows.sort(key=lambda r: (-r["score"], -float(r["volume"] or 0)))
-    return [r["ticker"] for r in rows[:per]]
-
-
-def test_related(viewer):
-    anchors = [r["ticker"] for r in db.query(
-        "SELECT ticker FROM kalshi_markets ORDER BY ticker")][::23]
-    compared = 0
-    for ticker in anchors:
-        for threshold in (0.1, 0.25, 0.5, 0.8):
-            got = viewer.related_markets("kalshi_candles", ticker, threshold=threshold)
-            mine = [m["id"] for m in got["rows"] if m["venue"] == "kalshi"]
-            want = brute_related(ticker, threshold, 12)
-            compared += 1
-            if mine != want:
-                check(False, f"2 related for {ticker} at {threshold}: {mine} vs {want}")
-                return
-    check(True, f"2 related wording = scoring every market ({compared} anchor/threshold pairs)")
-    ladder = viewer.related_markets("kalshi_candles", "TEST-0001", threshold=0.5)["rows"]
-    check(ladder and ladder[0]["title"] == "Bitcoin price on Nov 3, 2026 at 5pm EDT?"
-          and ladder[0]["id"] == "TEST-0030" and ladder[0]["score"] == 1.0,
-          "2 a ladder's own title comes first, as its busiest other market")
-
-
 def test_nearby(viewer):
     # Expiry: a busy single market in Crypto.
     anchor = db.query("""
@@ -256,14 +224,15 @@ def test_pages(viewer):
     c = viewer.app.test_client()
     page = c.get("/table/kalshi_candles?ticker=TEST-0001")
     text = page.get_data(as_text=True)
-    check(page.status_code == 200 and "related wording" in text and "nearby markets" in text
+    check(page.status_code == 200 and "title matching" in text and "odds / expiry filter" in text
           and "loading" in text and "Not built yet" not in text and "same strike" not in text,
           "5 a market page renders both panels, loading, with no strike control")
-    rel = c.get("/related?table=kalshi_candles&ticker=TEST-0001&t=0.3").get_json()
+    # No vectors in this schema: the feed says why instead of failing.
+    rel = c.get("/matching?table=kalshi_candles&ticker=TEST-0001&venue=other").get_json()
     near = c.get("/nearby?table=kalshi_candles&ticker=PA&by=price&pts=5&cat=1").get_json()
     old = c.get("/nearby?table=kalshi_candles&ticker=PA&by=strike&pct=2").get_json()
-    check(rel["rows"] and near["rows"] and old["by"] == "time",
-          f"5 /related ({len(rel['rows'])}) and /nearby ({len(near['rows'])}) answer;"
+    check(isinstance(rel["rows"], list) and near["rows"] and old["by"] == "time",
+          f"5 /matching ({len(rel['rows'])}, {rel.get('error')}) and /nearby ({len(near['rows'])}) answer;"
           f" by=strike gives {old['by']}")
     check(c.get("/table/kalshi_markets?ticker=PA").status_code == 200,
           "5 a market's row in kalshi_markets renders too")
@@ -273,7 +242,6 @@ def main():
     setup()
     import viewer
     test_titles()
-    test_related(viewer)
     test_nearby(viewer)
     test_pages(viewer)
     print()

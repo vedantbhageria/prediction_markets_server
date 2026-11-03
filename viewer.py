@@ -12,14 +12,12 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
 from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request)
-from psycopg2.extras import RealDictCursor
 
 import db
 import monitor
@@ -236,17 +234,22 @@ PAGE = """
            color: var(--ink); }
  .dims a.on { background: var(--link); color: #fff; }
  .main { flex: 1; overflow-x: auto; min-width: 0; }
- .related { width: 290px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
-            max-height: 78vh; overflow-y: auto; }
- .related b { display: block; font-size: 12px; text-transform: uppercase; color: var(--muted); }
- .related a { display: block; font-size: 12px; text-decoration: none; margin-top: 6px; }
- .related .meta { font-size: 11px; color: var(--muted); }
- .sliderow { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; }
- .sliderow input { flex: 1; }
- .sliderow span { font-size: 11px; color: var(--muted); width: 34px; text-align: right; }
- .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
- .dot.on { background: #4a4; }
- .cols.no-related .related { display: none; }
+ .matching { width: 300px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
+             max-height: 78vh; overflow-y: auto; }
+ .matching b { display: block; font-size: 12px; text-transform: uppercase; color: var(--muted); }
+ .matching .anchor { font-size: 11px; color: var(--faint); margin-bottom: 6px; }
+ .matching a.m { display: block; font-size: 12px; text-decoration: none; margin-top: 6px; }
+ .matching .meta { font-size: 11px; color: var(--muted); }
+ .wrow { display: grid; grid-template-columns: 78px 1fr 30px; gap: 6px; align-items: center;
+         margin: 2px 0; font-size: 11px; color: var(--muted); }
+ .wrow input { width: 100%; }
+ .wrow span { text-align: right; }
+ .mctl { margin: 6px 0 8px; font-size: 11px; }
+ .mctl a { cursor: pointer; margin-right: 6px; }
+ .mctl a.on { font-weight: 700; color: var(--ink); text-decoration: none; }
+ .chip { font-size: 10px; padding: 0 5px; border-radius: 6px; background: var(--soft); color: var(--muted); }
+ .chip.same { background: var(--ok-soft); color: var(--ok); }
+ .cols.no-matching .matching { display: none; }
  .nearby { width: 300px; flex: none; border-left: 1px solid var(--line); padding-left: 12px;
            max-height: 78vh; overflow-y: auto; }
  .nearby b { display: block; font-size: 12px; text-transform: uppercase;
@@ -284,10 +287,10 @@ PAGE = """
   {{ NAV|safe }}
   <span class="toggles">
     <button type="button" onclick="panel('filters')">filters</button>
-    {% if near %}<button type="button" onclick="panel('nearby')">nearby</button>{% else
-    %}<button type="button" disabled title="open a market (click a ticker) to see markets near it">nearby</button>{% endif %}
-    {% if related %}<button type="button" onclick="panel('related')">related</button>{% else
-    %}<button type="button" disabled title="open a market (click a ticker) to see markets worded like it">related</button>{% endif %}
+    {% if near %}<button type="button" onclick="panel('nearby')">odds / expiry</button>{% else
+    %}<button type="button" disabled title="open a market (click a ticker) to filter by odds and expiry">odds / expiry</button>{% endif %}
+    {% if matching %}<button type="button" onclick="panel('matching')">title matching</button>{% else
+    %}<button type="button" disabled title="open a market (click a ticker) to see markets asking the same thing">title matching</button>{% endif %}
   </span>
 </header>
 <nav>
@@ -478,61 +481,79 @@ PAGE = """
   {% endif %}
   </div>
 
-{% if related %}
-  <div class="related">
-    <b>related wording</b>
-    <div class="anchor">trigram similarity &middot; tune the bar</div>
-    <div class="sliderow">
-      <input type="range" id="thr" min="5" max="95" step="5"
-             value="{{ (related.threshold * 100) | round | int }}">
-      <span id="thrval">{{ (related.threshold * 100) | round | int }}%</span>
-    </div>
-    <div id="relrows">
-      {% if related.loading %}<span class="meta">loading&hellip;</span>{% else %}
-      {% for m in related.rows %}
-        <a href="{{ m.href }}" title="{{ m.title }}"><span class="venue {{ 'v-k' if m.venue == 'kalshi' else 'v-p' }}">{{ 'K' if m.venue == 'kalshi' else 'P' }}</span>{{ m.title[:70] }}{% if m.title|length > 70 %}&hellip;{% endif %}</a>
-        <span class="meta"><b>{{ '%.2f'|format(m.score) }}</b>
-          {% if m.got %}<span class="dot on" title="candles downloaded"></span>{% endif %}
-          {{ m.closes or '' }}{% if m.shared %} &middot; {{ m.shared|join(', ') }}{% endif %}</span>
-      {% else %}<span class="meta">nothing above this threshold</span>{% endfor %}
-      {% endif %}
-    </div>
+{% if matching %}
+  <div class="matching">
+    <b>title matching</b>
+    <div class="anchor">the same question on either venue, by meaning &middot; drag to weigh what counts</div>
+    <div class="mctl" id="mven"><a data-v="all" class="on">both venues</a><a data-v="other">other venue</a><a data-v="same">same venue</a></div>
+    <div class="mctl" id="mst"><a data-s="open" class="on">open</a><a data-s="all">open and closed</a></div>
+    <div id="wts"></div>
+    <div class="mctl"><a id="wdef">defaults</a><a id="wnoname">names off</a></div>
+    <div id="mrows"><span class="meta">loading&hellip;</span></div>
     <script>
     (function () {
-      var slider = document.getElementById('thr');
-      var label = document.getElementById('thrval');
-      var box = document.getElementById('relrows');
-      var timer = null, ctrl = null;
-      function esc(s) { return (s || '').replace(/[&<>"]/g, function (c) {
+      // Each weight says how much one kind of difference pushes a market
+      // down; the server sends every part, so moving a slider re-ranks here.
+      var W = [['wording', 'text', 'Wording', 2, 1.0], ['dates', 'days', 'Date gap', 0.5, 0.10],
+               ['strike', 'level', 'Strike gap', 1, 0.50], ['side', 'opposite', 'Above/below', 0.3, 0.05],
+               ['name', 'name', 'Name', 1, 0.40]];
+      var w = {}, rows = [], ven = 'all', st = 'open', ctrl = null;
+      var box = document.getElementById('mrows'), wts = document.getElementById('wts');
+      function esc(t) { return (t || '').replace(/[&<>"]/g, function (c) {
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
-      function draw(rows) {
-        if (!rows.length) { box.innerHTML = '<span class="meta">nothing above this threshold</span>'; return; }
-        box.innerHTML = rows.map(function (m) {
-          return '<a href="' + m.href + '" title="' + esc(m.title) + '">' +
-            '<span class="venue ' +
-            (m.venue === 'kalshi' ? 'v-k">K' : 'v-p">P') + '</span>' +
-            esc(m.title.slice(0, 70)) +
-            (m.title.length > 70 ? '…' : '') + '</a>' +
-            '<span class="meta"><b>' + m.score.toFixed(2) + '</b> ' +
-            (m.got ? '<span class="dot on"></span>' : '') + ' ' + (m.closes || '') +
-            (m.shared.length ? ' &middot; ' + esc(m.shared.join(', ')) : '') + '</span>';
+      function score(r) {
+        return w.wording * r.text + w.dates * Math.min(r.days || 0, 730) / 365 +
+               w.strike * Math.min(r.level_cost || 0, 1) + w.side * (r.opposite ? 1 : 0) +
+               w.name * (r.name || 0);
+      }
+      function draw() {
+        W.forEach(function (x) { document.getElementById('wv-' + x[0]).textContent = w[x[0]].toFixed(2); });
+        if (!rows.length) { box.innerHTML = '<span class="meta">nothing close enough</span>'; return; }
+        var order = rows.slice().sort(function (a, b) { return score(a) - score(b) || (a.ticker < b.ticker ? -1 : 1); });
+        box.innerHTML = order.slice(0, 25).map(function (r) {
+          var same = r.name === 0;
+          return '<a class="m" href="' + r.href + '" title="' + esc(r.title) + '"><span class="venue ' +
+            (r.venue === 'kalshi' ? 'v-k">K' : 'v-p">P') + '</span>' + esc(r.title.slice(0, 70)) +
+            (r.title.length > 70 ? '…' : '') + '</a><span class="meta"><b>' + score(r).toFixed(3) + '</b> ' +
+            (r.relation ? r.relation + ' ' : '') +
+            (r.entity ? '<span class="chip' + (same ? ' same' : '') + '">' + esc(r.entity.slice(0, 28)) + '</span> ' : '') +
+            (r.when ? '&middot; ' + esc(r.when) : '') + '</span>';
         }).join('');
       }
+      function setW(v) { W.forEach(function (x) { w[x[0]] = v[x[0]]; document.getElementById('w-' + x[0]).value = w[x[0]]; }); draw(); }
+      W.forEach(function (x) {
+        var d = document.createElement('div'); d.className = 'wrow';
+        d.innerHTML = '<label for="w-' + x[0] + '">' + x[2] + '</label><input type="range" id="w-' + x[0] +
+          '" min="0" max="' + x[3] + '" step="0.01"><span id="wv-' + x[0] + '"></span>';
+        wts.appendChild(d);
+        d.querySelector('input').addEventListener('input', function (e) { w[x[0]] = parseFloat(e.target.value); draw(); });
+      });
+      var DEF = {}; W.forEach(function (x) { DEF[x[0]] = x[4]; });
+      document.getElementById('wdef').onclick = function () { setW(DEF); };
+      document.getElementById('wnoname').onclick = function () { setW(Object.assign({}, w, {name: 0})); };
+      function pick(id, attr, set) {
+        document.getElementById(id).addEventListener('click', function (e) {
+          var a = e.target.closest('a'); if (!a) return;
+          [].forEach.call(this.children, function (c) { c.classList.toggle('on', c === a); });
+          set(a.getAttribute(attr)); load();
+        });
+      }
+      pick('mven', 'data-v', function (v) { ven = v; });
+      pick('mst', 'data-s', function (v) { st = v; });
       function load() {
-        if (ctrl) ctrl.abort();            // drop the in-flight request
+        if (ctrl) ctrl.abort();
         ctrl = new AbortController();
         box.style.opacity = 0.5;
-        fetch('/related?table={{ table_name }}&ticker={{ selection|urlencode }}&t=' +
-              (slider.value / 100), {signal: ctrl.signal})
+        fetch('/matching?table={{ table_name }}&ticker={{ selection|urlencode }}&venue=' + ven + '&status=' + st,
+              {signal: ctrl.signal})
           .then(function (r) { return r.json(); })
-          .then(function (d) { box.style.opacity = 1; draw(d.rows); })
-          .catch(function () {});
+          .then(function (d) {
+            box.style.opacity = 1;
+            if (d.error) { box.innerHTML = '<span class="meta">' + esc(d.error) + '</span>'; rows = []; return; }
+            rows = d.rows; draw();
+          }).catch(function () {});
       }
-      slider.addEventListener('input', function () {
-        label.textContent = slider.value + '%';
-        clearTimeout(timer);
-        timer = setTimeout(load, 200);
-      });
+      setW(DEF);
       load();                              // the page does not wait for it
     })();
     </script>
@@ -540,7 +561,7 @@ PAGE = """
 {% endif %}
 {% if near %}
   <div class="nearby">
-    <b>nearby markets</b>
+    <b>odds / expiry filter</b>
     <div class="anchor" id="nearhead">
       {% if near.loading %}same expiry or odds{% else %}
       {{ near.kalshi_n }} Kalshi, {{ near.poly_n }} Polymarket
@@ -665,12 +686,12 @@ function marks() {
   var b = document.querySelectorAll('header .toggles button');
   if (b[0]) b[0].classList.toggle('off', cols.classList.contains('no-filters'));
   if (b[1]) b[1].classList.toggle('off', cols.classList.contains('no-nearby'));
-  if (b[2]) b[2].classList.toggle('off', cols.classList.contains('no-related'));
+  if (b[2]) b[2].classList.toggle('off', cols.classList.contains('no-matching'));
 }
 (function () {
   var cols = document.getElementById('cols');
   if (!cols) return;
-  ['no-filters', 'no-nearby', 'no-related'].forEach(function (c) {
+  ['no-filters', 'no-nearby', 'no-matching'].forEach(function (c) {
     if (localStorage.getItem(c)) cols.classList.add(c);
   });
   marks();
@@ -683,7 +704,7 @@ function marks() {
 def render(**kwargs):
     base = dict(groups=table_groups(), rows=None, cols=[], sql=None, error=None,
                 panels=[], selection=None, table_name=None, candle_table=None,
-                detail=None, near=None, related=None, msg=None, fetchable=False, dim="",
+                detail=None, near=None, matching=None, msg=None, fetchable=False, dim="",
 
                 asset_value="", ticker_value="", job=None, raw_doc=None, q="", limit=200,
                 table_more=False, table_qs="",
@@ -2434,133 +2455,9 @@ def build_panels(name, value, ticker, dim="", limit=200):
     return panels
 
 
-NEAREST_TITLES = 60        # distinct titles fetched before the threshold is applied
-NEAREST_KEEP = 600         # seconds a title's nearest titles are remembered
-_nearest = {}              # title -> (fetched at, [(title, score)]), nearest first
-_nearest_lock = threading.Lock()
-
-
-def nearest_titles(text):
-    """The NEAREST_TITLES distinct Kalshi titles closest to `text`, with their
-    similarity. Finding them is the slow part (~0.4 s over half a million
-    titles) and does not depend on the slider, so they are remembered: moving
-    the slider then costs only the market lookup."""
-    now = time.monotonic()
-    with _nearest_lock:
-        hit = _nearest.get(text)
-    if hit and now - hit[0] < NEAREST_KEEP:
-        return hit[1]
-    rows = db.query("SELECT title, similarity(title, %s) AS score FROM kalshi_titles"
-                    " ORDER BY title <-> %s LIMIT %s", (text, text, NEAREST_TITLES))
-    found = [(r["title"], float(r["score"])) for r in rows]
-    with _nearest_lock:
-        if len(_nearest) > 2000:
-            _nearest.clear()
-        _nearest[text] = (now, found)
-    return found
-
-
-_related_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="related")
-
-
-def related_markets(name, ident, threshold=0.25, limit=25, same_venue=True):
-    """Markets whose wording resembles this one, on either venue.
-
-    Uses trigram similarity (pg_trgm), which scores 0-1 on how much text two
-    titles share. The threshold is exposed as a slider because the useful value
-    depends entirely on the market: Kalshi ladder titles are near-identical to
-    their siblings and need a high bar, while a Polymarket question phrased
-    differently about the same event may only score 0.2.
-
-    Titles are deduplicated -- a Kalshi day-ladder has hundreds of markets with
-    one title, and listing them all would bury anything genuinely related. On
-    Kalshi that is done by matching kalshi_titles, one row per distinct title,
-    nearest first through its GiST index, and then taking each title's busiest
-    market: well under a second, where scoring every market took seconds.
-    """
-    if name in POLY:
-        anchor = db.query("SELECT question AS t FROM poly_markets"
-                          " WHERE condition_id = %s", (ident,))
-    else:
-        anchor = db.query("SELECT title AS t FROM kalshi_markets WHERE ticker = %s", (ident,))
-    if not anchor or not anchor[0]["t"]:
-        return None
-    text = anchor[0]["t"]
-
-    # Rank within each venue before merging. A global top-N fills up with
-    # Kalshi ladder siblings (they score 0.7-1.0 against each other) and the
-    # Polymarket market asking the same question -- which scores ~0.4 because
-    # it is worded differently -- never makes the cut.
-    per = max(6, limit // 2)
-    args = {"t": text, "id": ident, "thr": threshold, "per": per}
-
-    def kalshi_side():
-        scores = {t: sc for t, sc in nearest_titles(text) if sc >= threshold}
-        with connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Each title's busiest market first, then only those few are
-                # joined and looked up (a ladder has hundreds per title).
-                cur.execute("""
-                    SELECT d.*, e.category,
-                           EXISTS (SELECT 1 FROM kalshi_candles c WHERE c.ticker = d.id) AS got
-                    FROM (SELECT DISTINCT ON (m.title) 'kalshi' AS venue, m.ticker AS id,
-                                 m.title, m.event_ticker, m.volume,
-                                 to_char(m.close_time, 'YYYY-MM-DD HH24:MI') AS closes
-                          FROM kalshi_markets m
-                          WHERE m.title = ANY(%(titles)s) AND m.ticker <> %(id)s
-                          ORDER BY m.title, m.volume DESC NULLS LAST) d
-                    JOIN kalshi_events e USING (event_ticker)""",
-                            dict(args, titles=list(scores)))
-                found = [dict(r, score=scores[r["title"]]) for r in cur.fetchall()]
-        found.sort(key=lambda r: (-r["score"], -float(r["volume"] or 0)))
-        return found[:per]
-
-    def poly_side():
-        with connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # The nearest questions first, through the GiST index
-                # (ORDER BY question <-> text), as Kalshi's titles are: a
-                # filter on similarity read every candidate of 1.6 million.
-                cur.execute("""
-                    SELECT y.*, e.category,
-                           EXISTS (SELECT 1 FROM poly_candles c WHERE c.condition_id = y.id) AS got
-                    FROM (SELECT DISTINCT ON (x.question) 'poly' AS venue, x.condition_id AS id,
-                                 x.question AS title, x.event_id, x.volume, x.score,
-                                 to_char(x.end_date, 'YYYY-MM-DD HH24:MI') AS closes
-                          FROM (SELECT p.condition_id, p.question, p.event_id, p.volume, p.end_date,
-                                       similarity(p.question, %(t)s) AS score
-                                FROM poly_markets p WHERE p.condition_id <> %(id)s
-                                ORDER BY p.question <-> %(t)s LIMIT %(near)s) x
-                          ORDER BY x.question, x.volume DESC NULLS LAST) y
-                    LEFT JOIN poly_events e USING (event_id)
-                    WHERE y.score >= %(thr)s
-                    ORDER BY y.score DESC, y.volume DESC NULLS LAST LIMIT %(per)s""",
-                            dict(args, near=NEAREST_TITLES))
-                return cur.fetchall()
-
-    # The two venues are searched at the same time, each on its own
-    # connection: the panel waits for the slower one, not for both in turn.
-    sides = []
-    if same_venue or name in POLY:
-        sides.append(kalshi_side)
-    if same_venue or name not in POLY:
-        sides.append(poly_side)
-    rows = [r for part in _related_pool.map(lambda f: f(), sides) for r in part]
-
-    # Show which words drove the match, so a low score is interpretable.
-    stop = {"the","a","an","will","be","by","on","in","at","to","of","and","or",
-            "is","it","for","before","after","than","this","that","price","2026","2027"}
-    anchor_words = {w for w in re.findall(r"[a-z0-9$,\.]+", text.lower())
-                    if len(w) > 2 and w not in stop}
-    out = []
-    for r in rows:
-        words = {w for w in re.findall(r"[a-z0-9$,\.]+", (r["title"] or "").lower())
-                 if len(w) > 2 and w not in stop}
-        shared = sorted(anchor_words & words)[:4]
-        out.append(dict(r, score=float(r["score"]), shared=shared,
-                        href=("/table/poly_candles?ticker=" if r["venue"] == "poly"
-                              else "/table/kalshi_candles?ticker=") + r["id"]))
-    return {"anchor": text, "threshold": threshold, "rows": out}
+# Markets the title-matching panel re-ranks in the browser: the nearest by the
+# default weights, enough that other weights still find their own nearest.
+MATCH_POOL = 300
 
 
 @app.route("/nearby")
@@ -2592,19 +2489,29 @@ def nearby_feed():
     })
 
 
-@app.route("/related")
-def related_feed():
-    """Related-market list at a given threshold, re-fetched as the slider moves."""
+@app.route("/matching")
+def matching_feed():
+    """The title-matching panel's markets: the API's similar search (vectors,
+    then the fields), with every part of the distance, so the panel re-ranks
+    them itself as its weight sliders move."""
+    from api import similar as S
+    from api.common import ApiError
     name = request.args.get("table", "kalshi_candles")
     ident = request.args.get("ticker", "")
+    home = "poly" if name in POLY else "kalshi"
+    venue = {"all": "all", "same": home,
+             "other": "kalshi" if home == "poly" else "poly"}.get(request.args.get("venue"), "all")
+    status = request.args.get("status") if request.args.get("status") in ("open", "all") else "open"
     try:
-        threshold = min(max(float(request.args.get("t", 0.25)), 0.05), 0.95)
-    except ValueError:
-        threshold = 0.25
-    data = related_markets(name, ident, threshold=threshold)
-    if not data:
-        return jsonify({"rows": []})
-    return jsonify({"threshold": threshold, "rows": data["rows"]})
+        with db.cursor() as cur:
+            rows, me = S.similar(cur, ident, MATCH_POOL, venue, status)
+    except ApiError as exc:
+        return jsonify({"rows": [], "error": exc.message})
+    for r in rows:
+        r["level_cost"] = S._level_cost(me, r["level"])
+        r["href"] = ("/table/poly_candles?ticker=" if r["venue"] == "poly"
+                     else "/table/kalshi_candles?ticker=") + r["ticker"]
+    return jsonify({"rows": rows})
 
 
 # A market's price is its last trade, worked out when asked: the newest
@@ -2969,11 +2876,11 @@ def table(name):
             detail["live"] = detail["live"] and not detail.get("is_closed")
         detail["closes_in"] = _human_delta(close - datetime.now(close.tzinfo))             if detail["live"] else None
 
-    # Related wording and nearby markets fill themselves in from /related and
-    # /nearby once the page is up, so the page never waits for them.
-    near = related = None
+    # Title matching and the odds / expiry filter fill themselves in from
+    # /matching and /nearby once the page is up, so the page never waits.
+    near = matching = None
     if ticker and name in ("kalshi_markets", "poly_markets", "kalshi_candles", "poly_candles"):
-        related = {"threshold": 0.25, "rows": [], "loading": True}
+        matching = True
         near = {"by": "time", "hours": 1, "points": 5, "same_category": True,
                 "loading": True, "rows": []}
 
@@ -3019,7 +2926,7 @@ def table(name):
                   panels=build_panels(name, asset, ticker, dim),
                   selection=ticker or asset, table_name=name,
                   candle_table=candle_table, detail=detail, near=near,
-                  related=related,
+                  matching=matching,
                   msg=request.args.get("msg"), fetchable=fetchable, job=job,
                   fetch_estimate=fetch_estimate,
                   q=q, limit=cap, table_more=table_more, table_qs=table_qs,

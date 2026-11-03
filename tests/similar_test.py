@@ -182,6 +182,28 @@ def main():
           and S._name({"entity": "Los Angeles R"}, {"entity": "Los Angeles Chargers"}) > 0.3
           and S._name({"entity": "Drake"}, {"entity": "Drake Bell"}) > 0
           and S._name({"entity": None}, {"entity": "x"}) is None)
+
+    # The weights: each part of the distance counts as much as it is told to.
+    with db.cursor() as cur:
+        plain, me = S.similar(cur, "0xa1", limit=20, max_cosine=0.5)
+        same, _ = S.similar(cur, "0xa1", limit=20, max_cosine=0.5, weights=dict(S.WEIGHTS))
+        unnamed, _ = S.similar(cur, "0xa1", limit=20, max_cosine=0.5, weights={"name": 0})
+        wording, _ = S.similar(cur, "0xa1", limit=20, max_cosine=0.5,
+                               weights={"days": 0, "level": 0, "opposite": 0, "name": 0})
+    check("the default weights are what no weights give",
+          [(r["ticker"], r["distance"]) for r in plain] == [(r["ticker"], r["distance"]) for r in same])
+    old = [round(r["text"] + 0.10 * min(r["days"] or 0, 730) / 365
+                 + 0.50 * min(S._level_cost(me, r["level"]), 1) + 0.05 * r["opposite"], 4)
+           for r in unnamed]
+    check("name weight 0 is the distance from before names counted",
+          [r["distance"] for r in unnamed] == old, list(zip([r["distance"] for r in unnamed], old))[:4])
+    check("only wording weighed: the distance is the wording gap, nearest first",
+          all(r["distance"] == round(r["text"], 4) for r in wording)
+          and [r["text"] for r in wording] == sorted(r["text"] for r in wording))
+    check("a missing threshold counts as the whole strike gap",
+          S._level_cost({"kind": "threshold", "low": 70000}, None) == 1
+          and S._level_cost({"kind": "threshold", "low": 70000}, 0.05) == 0.05
+          and S._level_cost({"kind": "outcome", "low": None}, None) == 0)
     try:
         ask("0xc2")
         check("asking about a placeholder is refused", False)

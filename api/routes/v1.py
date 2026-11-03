@@ -668,9 +668,19 @@ def market_similar(ticker: str = TICKER,
                    gates: str | None = Query(
                        None, description="subject, keywords (comma-separated): drop pairs"
                        " about a different subject, or whose key words or names differ"),
+                   w_wording: float = Query(1.0, ge=0, le=10, description="weight of the"
+                                            " wording gap (cosine)"),
+                   w_days: float = Query(0.10, ge=0, le=10, description="weight per year"
+                                         " between the dates the questions turn on"),
+                   w_strike: float = Query(0.50, ge=0, le=10, description="weight of the"
+                                           " relative gap between thresholds"),
+                   w_opposite: float = Query(0.05, ge=0, le=10, description="added where"
+                                             " one asks above and the other below"),
+                   w_name: float = Query(0.40, ge=0, le=10, description="weight of the gap"
+                                         " between named outcomes; 0 = names do not count"),
                    format: Format = FORMAT):
-    """Nearest first, by one distance made of the text, timing, level and name
-    gaps (each also given on its own). See /docs for the formula. `relation` reads
+    """Nearest first, by one distance made of the text, timing, level, side and
+    name gaps (each also given on its own), each with a weight you can set. See /docs for the formula. `relation` reads
     how the two questions relate, from their fields; it filters nothing."""
     wanted = set(_names(gates) or [])
     unknown = wanted - {"subject", "keywords"}
@@ -678,15 +688,19 @@ def market_similar(ticker: str = TICKER,
         raise ApiError(400, "invalid_parameter",
                        f"gates: subject and/or keywords, not {', '.join(sorted(unknown))}")
     with read() as cur:
+        weights = {"text": w_wording, "days": w_days, "level": w_strike,
+                   "opposite": w_opposite, "name": w_name}
         rows, me = similar_markets.similar(cur, ticker, limit, venue, status, max_cosine,
-                                           max_days, max_level, wanted)
+                                           max_days, max_level, wanted, weights)
     asked = {k: me.get(k) for k in ("venue", "kind", "subject", "entity", "comparator", "low",
                                      "high", "unit", "when", "when_kind", "template")}
     return table(rows, similar_markets.COLUMNS, format, key="markets",
                  meta={"ticker": ticker, "market": clean(asked),
                        "limits": {"max_cosine": max_cosine, "max_days": max_days,
                                   "max_level": max_level, "gates": sorted(wanted),
-                                  "venue": venue, "status": status}})
+                                  "venue": venue, "status": status},
+                       "weights": {"wording": w_wording, "days": w_days, "strike": w_strike,
+                                   "opposite": w_opposite, "name": w_name}})
 
 
 TRADE_COLUMNS = ["ts", "outcome", "side", "price", "yes_price", "size", "notional", "wallet",

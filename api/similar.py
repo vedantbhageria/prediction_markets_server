@@ -14,7 +14,11 @@
                  so a ladder's strikes all share one template)
        days      days between the dates the two questions turn on
        level     relative gap between their thresholds, |a - b| / max(|a|, |b|)
-                 (0.05 = 5%), where both have one in the same unit
+                 (0.05 = 5%), where both have one in the same unit. Where the
+                 market asked about has a threshold and the other has none
+                 (or one in another unit) it counts as 1 in the distance -- a
+                 question about something else ("Bitcoin kimchi premium hits
+                 8%") must not beat the same question at another strike
        opposite  true where one asks "above" and the other "below"
        name      how far apart the two named outcomes are, where the market
                  asked about has one: 1 - trigram similarity of the two names
@@ -23,11 +27,14 @@
                  masks the name, so without it every candidate in a "who will
                  win" event looks equally near.
 
-   and those make one distance to sort by:
+   and those make one distance to sort by, each part with its weight
+   (WEIGHTS; every one can be set per request):
 
-       distance = text + 0.10 * min(days, 730) / 365
-                       + 0.50 * min(level, 1) + (0.05 if opposite)
-                       + 0.40 * name
+       distance = 1.00 * text + 0.10 * min(days, 730) / 365
+                + 0.50 * min(level, 1) + 0.05 * opposite + 0.40 * name
+
+   A weight of 0 leaves that part out: name 0 is the ranking from before
+   names counted.
 
 4. The limits asked for drop what is too far: max_cosine on text, max_days
    on days, max_level on level. A limit applies only where both markets have
@@ -61,6 +68,8 @@ VENUE_SQL = {
                FROM propositions p JOIN poly_markets m ON m.condition_id = p.market_id
                WHERE p.venue = 'poly'""",
 }
+# How much each part counts in the distance (see the module's doc).
+WEIGHTS = {"text": 1.0, "days": 0.10, "level": 0.50, "opposite": 0.05, "name": 0.40}
 MAX_TEMPLATES = 1000        # nearest templates read (pgvector's ef_search ceiling)
 MAX_MARKETS = 50_000        # markets measured per request
 
@@ -134,14 +143,26 @@ def _name(a, b):
     return 1 - len(ga & gb) / len(ga | gb)
 
 
-def distance(text, days, level, opposite, name=None):
-    return (text + 0.10 * min(days or 0, 730) / 365 + 0.50 * min(level or 0, 1)
-            + (0.05 if opposite else 0) + 0.40 * (name or 0))
+def _level_cost(a, level):
+    """The level that counts in the distance: the gap where both have a
+    threshold, 1 where only the market asked about has one."""
+    if level is not None:
+        return level
+    return 1.0 if a.get("kind") == "threshold" and a.get("low") is not None else 0.0
+
+
+def distance(text, days, level, opposite, name=None, weights=None):
+    w = WEIGHTS if weights is None else weights
+    return (w["text"] * text + w["days"] * min(days or 0, 730) / 365
+            + w["level"] * min(level or 0, 1) + w["opposite"] * (1 if opposite else 0)
+            + w["name"] * (name or 0))
 
 
 def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
-            max_days=None, max_level=None, gates=()):
-    """(rows nearest first, the market asked about)."""
+            max_days=None, max_level=None, gates=(), weights=None):
+    """(rows nearest first, the market asked about). `weights` overrides any
+    of WEIGHTS."""
+    weights = dict(WEIGHTS, **(weights or {}))
     home = _venue_of(ticker)
     cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
     if not cur.fetchone():
@@ -217,7 +238,7 @@ def similar(cur, ticker, limit=50, venue="all", status="open", max_cosine=0.3,
             "when": c["when"], "when_kind": c["when_kind"],
             "text": round(text, 4), "days": days, "level": None if level is None else round(level, 4),
             "opposite": opp, "name": None if name is None else round(name, 4),
-            "distance": round(distance(text, days, level, opp, name), 4),
+            "distance": round(distance(text, days, _level_cost(me, level), opp, name, weights), 4),
             "relation": R.relate(me, c)[0]})
     rows.sort(key=lambda r: (r["distance"], r["ticker"]))
     return rows[:limit], me
