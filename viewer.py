@@ -497,7 +497,7 @@ PAGE = """
       var W = [['wording', 'text', 'Wording', 2, 1.0], ['dates', 'days', 'Date gap', 0.5, 0.10],
                ['strike', 'level', 'Strike gap', 1, 0.50], ['side', 'opposite', 'Above/below', 0.3, 0.05],
                ['name', 'name', 'Name', 1, 0.40]];
-      var w = {}, rows = [], ven = 'all', st = 'open', ctrl = null;
+      var w = {}, rows = null, ven = 'all', st = 'open', ctrl = null;   // rows: null until the first answer
       var box = document.getElementById('mrows'), wts = document.getElementById('wts');
       function esc(t) { return (t || '').replace(/[&<>"]/g, function (c) {
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
@@ -508,6 +508,7 @@ PAGE = """
       }
       function draw() {
         W.forEach(function (x) { document.getElementById('wv-' + x[0]).textContent = w[x[0]].toFixed(2); });
+        if (!rows) return;
         if (!rows.length) { box.innerHTML = '<span class="meta">nothing close enough</span>'; return; }
         var order = rows.slice().sort(function (a, b) { return score(a) - score(b) || (a.ticker < b.ticker ? -1 : 1); });
         box.innerHTML = order.slice(0, 25).map(function (r) {
