@@ -132,15 +132,23 @@ CREATE INDEX IF NOT EXISTS kalshi_observations_scan_idx ON kalshi_observations (
 
 -- Kalshi's perpetual futures were dropped on 3 Nov 2026 (never collected
 -- here); their empty tables go. A table that somehow holds rows is kept.
+-- (Dynamic SQL: a table named in the block itself is looked up even where the
+-- branch never runs, and a fresh database has neither.)
 DO $$
+DECLARE
+    has_rows boolean;
 BEGIN
-    IF to_regclass('kalshi_perp_candles') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM kalshi_perp_candles) THEN
-        DROP TABLE kalshi_perp_candles;
+    IF to_regclass('kalshi_perp_candles') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM kalshi_perp_candles)' INTO has_rows;
+        IF NOT has_rows THEN
+            EXECUTE 'DROP TABLE kalshi_perp_candles';
+        END IF;
     END IF;
-    IF to_regclass('kalshi_perp_markets') IS NOT NULL AND to_regclass('kalshi_perp_candles') IS NULL
-       AND NOT EXISTS (SELECT 1 FROM kalshi_perp_markets) THEN
-        DROP TABLE kalshi_perp_markets;
+    IF to_regclass('kalshi_perp_markets') IS NOT NULL AND to_regclass('kalshi_perp_candles') IS NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM kalshi_perp_markets)' INTO has_rows;
+        IF NOT has_rows THEN
+            EXECUTE 'DROP TABLE kalshi_perp_markets';
+        END IF;
     END IF;
 END $$;
 
